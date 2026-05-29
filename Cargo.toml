@@ -1,0 +1,29 @@
+[package]
+name = "idx-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[dependencies]
+anyhow = "1.0.102"
+axum = "0.8"
+duckdb = { version = "1.10503.1", features = ["bundled", "json", "parquet"] }
+rand = "0.10.1"
+rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
