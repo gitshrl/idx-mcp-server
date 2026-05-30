@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -43,7 +43,7 @@ impl KeyStore {
     pub fn add_key(&self, label: &str) -> Result<String> {
         let plaintext = generate_key();
         let hash = hash_key(&plaintext);
-        let conn = self.conn.lock().expect("keystore mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.execute(
             "INSERT INTO api_keys (key_hash, label, created_at) VALUES (?1, ?2, datetime('now'))",
             params![hash, label],
@@ -55,7 +55,7 @@ impl KeyStore {
     /// Return the key id if the plaintext matches an active key.
     pub fn verify(&self, plaintext: &str) -> Result<Option<i64>> {
         let hash = hash_key(plaintext);
-        let conn = self.conn.lock().expect("keystore mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let id = conn
             .query_row(
                 "SELECT id FROM api_keys WHERE key_hash = ?1 AND active = 1",
@@ -68,7 +68,7 @@ impl KeyStore {
     }
 
     pub fn log_usage(&self, key_id: i64, tool: &str, latency_ms: i64, rows: i64) -> Result<()> {
-        let conn = self.conn.lock().expect("keystore mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.execute(
             "INSERT INTO usage (key_id, tool, ts, latency_ms, rows) VALUES (?1, ?2, datetime('now'), ?3, ?4)",
             params![key_id, tool, latency_ms, rows],

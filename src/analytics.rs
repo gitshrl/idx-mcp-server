@@ -250,6 +250,7 @@ impl Analytics {
             bail!("empty query");
         }
         let cap = limit.map_or(MAX_ROWS, |n| n.min(MAX_ROWS)).max(1);
+        let timeout = query_timeout();
         let serving = self.current();
         let (permit, slot) = serving.checkout().await?;
         let interrupt = slot.interrupt.clone();
@@ -259,7 +260,7 @@ impl Analytics {
             (slot, result)
         });
 
-        match tokio::time::timeout(QUERY_TIMEOUT, &mut task).await {
+        match tokio::time::timeout(timeout, &mut task).await {
             Ok(Ok((slot, result))) => {
                 serving.checkin(slot);
                 drop(permit);
@@ -275,7 +276,7 @@ impl Analytics {
             Err(_) => {
                 interrupt.interrupt();
                 spawn_reclaim(serving, task, permit);
-                bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs())
+                bail!("query exceeded the {}s time limit", timeout.as_secs())
             }
         }
     }
@@ -286,6 +287,7 @@ impl Analytics {
     /// # Errors
     /// Propagates a backend query failure or an exceeded time limit.
     pub async fn query_json(&self, sql: String, params: Vec<String>) -> Result<Vec<Value>> {
+        let timeout = query_timeout();
         let serving = self.current();
         let (permit, slot) = serving.checkout().await?;
         let interrupt = slot.interrupt.clone();
@@ -295,7 +297,7 @@ impl Analytics {
             (slot, result)
         });
 
-        match tokio::time::timeout(QUERY_TIMEOUT, &mut task).await {
+        match tokio::time::timeout(timeout, &mut task).await {
             Ok(Ok((slot, result))) => {
                 serving.checkin(slot);
                 drop(permit);
@@ -308,7 +310,7 @@ impl Analytics {
             Err(_) => {
                 interrupt.interrupt();
                 spawn_reclaim(serving, task, permit);
-                bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs())
+                bail!("query exceeded the {}s time limit", timeout.as_secs())
             }
         }
     }
@@ -328,18 +330,29 @@ impl Analytics {
             relations.push((v.clone(), "view"));
         }
 
+        let timeout = query_timeout();
         let (permit, slot) = serving.checkout().await?;
-        let task = tokio::task::spawn_blocking(move || -> (ConnSlot, Result<Value>) {
+        let interrupt = slot.interrupt.clone();
+        let mut task = tokio::task::spawn_blocking(move || -> (ConnSlot, Result<Value>) {
             let result = describe_relations(&slot.conn, &relations, only.as_deref());
             (slot, result)
         });
-        let Ok((slot, result)) = task.await else {
-            permit.forget();
-            bail!("describe task failed");
-        };
-        serving.checkin(slot);
-        drop(permit);
-        result
+        match tokio::time::timeout(timeout, &mut task).await {
+            Ok(Ok((slot, result))) => {
+                serving.checkin(slot);
+                drop(permit);
+                result
+            }
+            Ok(Err(_)) => {
+                permit.forget();
+                bail!("describe task failed")
+            }
+            Err(_) => {
+                interrupt.interrupt();
+                spawn_reclaim(serving, task, permit);
+                bail!("describe exceeded the {}s time limit", timeout.as_secs())
+            }
+        }
     }
 
     fn current(&self) -> Arc<Serving> {
@@ -428,7 +441,7 @@ fn view_sql(name: &str) -> Option<&'static str> {
 }
 
 const LATEST_VIEW: &str = "\
-CREATE VIEW latest AS
+CREATE TABLE latest AS
 WITH p AS (
   SELECT ticker, close, volume, date AS price_date
   FROM prices QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
@@ -452,10 +465,11 @@ FROM companies c
 LEFT JOIN p ON p.ticker = c.ticker
 LEFT JOIN f ON f.ticker = c.ticker
 LEFT JOIN summary s ON s.ticker = c.ticker
-LEFT JOIN i ON i.ticker = c.ticker;";
+LEFT JOIN i ON i.ticker = c.ticker
+ORDER BY c.ticker;";
 
 const RETURNS_VIEW: &str = "\
-CREATE VIEW returns AS
+CREATE TABLE returns AS
 WITH lc AS (
   SELECT ticker, close, date AS as_of
   FROM prices QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
@@ -476,10 +490,11 @@ ASOF LEFT JOIN prices w3m ON w3m.ticker = lc.ticker AND w3m.date <= lc.as_of - I
 ASOF LEFT JOIN prices w6m ON w6m.ticker = lc.ticker AND w6m.date <= lc.as_of - INTERVAL '6 months'
 ASOF LEFT JOIN prices wyt ON wyt.ticker = lc.ticker AND wyt.date <  date_trunc('year', lc.as_of)
 ASOF LEFT JOIN prices w1y ON w1y.ticker = lc.ticker AND w1y.date <= lc.as_of - INTERVAL '1 year'
-ASOF LEFT JOIN prices w3y ON w3y.ticker = lc.ticker AND w3y.date <= lc.as_of - INTERVAL '3 years';";
+ASOF LEFT JOIN prices w3y ON w3y.ticker = lc.ticker AND w3y.date <= lc.as_of - INTERVAL '3 years'
+ORDER BY lc.ticker;";
 
 const BROKER_NET_VIEW: &str = "\
-CREATE VIEW broker_net AS
+CREATE TABLE broker_net AS
 SELECT ticker, date, broker_code,
   sum(value) FILTER (WHERE side = 'B') AS buy_value,
   sum(value) FILTER (WHERE side = 'S') AS sell_value,
@@ -488,18 +503,20 @@ SELECT ticker, date, broker_code,
   sum(volume_lot) FILTER (WHERE side = 'S') AS sell_volume_lot,
   coalesce(sum(volume_lot) FILTER (WHERE side = 'B'), 0) - coalesce(sum(volume_lot) FILTER (WHERE side = 'S'), 0) AS net_volume_lot
 FROM broker_activity
-GROUP BY ticker, date, broker_code;";
+GROUP BY ticker, date, broker_code
+ORDER BY ticker, date;";
 
 /// Open the built file read-only, lock it down, and clone N connections that
 /// share the one locked instance (one buffer pool, one memory budget) so
 /// queries run concurrently. Read-only + external-access-off + lock are
 /// instance-level, so every cloned connection is equally sandboxed.
 fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Result<Serving> {
+    let pool_size = serving_connections();
     let config = Config::default()
         .access_mode(AccessMode::ReadOnly)?
         .enable_external_access(false)?
         .enable_autoload_extension(false)?
-        .max_memory(MAX_MEMORY)?
+        .max_memory(&max_memory())?
         .threads(serving_threads())?;
     let primary = Connection::open_with_flags(path, config)
         .with_context(|| format!("open serving db read-only {}", path.display()))?;
@@ -509,8 +526,8 @@ fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Resu
         .execute_batch("SET lock_configuration = true;")
         .context("lock configuration")?;
 
-    let mut slots = Vec::with_capacity(SERVING_CONNECTIONS);
-    for _ in 1..SERVING_CONNECTIONS {
+    let mut slots = Vec::with_capacity(pool_size);
+    for _ in 1..pool_size {
         let clone = primary.try_clone().context("clone serving connection")?;
         let interrupt = clone.interrupt_handle();
         slots.push(ConnSlot {
@@ -538,6 +555,28 @@ fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Resu
 fn serving_threads() -> i64 {
     let n = std::thread::available_parallelism().map_or(4, |p| p.get().clamp(2, 16));
     i64::try_from(n).unwrap_or(4)
+}
+
+/// Per-connection memory cap (`IDX_MAX_MEMORY`, default 2GB) — tune down for
+/// small containers, up for big hosts.
+fn max_memory() -> String {
+    std::env::var("IDX_MAX_MEMORY").unwrap_or_else(|_| MAX_MEMORY.to_string())
+}
+
+/// Serving pool size (`IDX_SERVING_CONNECTIONS`, default 8, clamped 1..=64).
+fn serving_connections() -> usize {
+    std::env::var("IDX_SERVING_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(SERVING_CONNECTIONS, |n: usize| n.clamp(1, 64))
+}
+
+/// Per-query timeout (`IDX_QUERY_TIMEOUT_SECS`, default 15).
+fn query_timeout() -> Duration {
+    std::env::var("IDX_QUERY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(QUERY_TIMEOUT, Duration::from_secs)
 }
 
 /// Remove serving directories left by processes that are no longer alive
@@ -756,6 +795,48 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             sqlite_path: ":memory:".to_string(),
             data_base: DataBase::Local("data".to_string()),
+        }
+    }
+
+    /// `validate` only needs `DuckDB`'s parser (json bundled), not data — so the
+    /// security gate runs in CI on every build, catching fail-open / AST drift.
+    fn parser_conn() -> Connection {
+        Connection::open_in_memory().expect("open in-memory duckdb")
+    }
+
+    #[test]
+    fn validate_accepts_allowed_selects() {
+        let c = parser_conn();
+        for sql in [
+            "SELECT ticker, close FROM prices LIMIT 5",
+            "SELECT * FROM latest WHERE market_cap > 1e12",
+            "WITH x AS (SELECT ticker FROM prices) SELECT * FROM x JOIN companies USING(ticker)",
+            "SELECT ticker, ret_1y FROM returns ORDER BY ret_1y DESC",
+            "SELECT * FROM generate_series(1, 5)",
+        ] {
+            assert!(validate(&c, sql).is_ok(), "should accept: {sql}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_dangerous_or_unknown() {
+        let c = parser_conn();
+        for sql in [
+            "SELECT * FROM read_parquet('x.parquet')",
+            "SELECT * FROM read_csv('x.csv')",
+            "DROP TABLE prices",
+            "INSERT INTO prices VALUES (1)",
+            "UPDATE prices SET close = 0",
+            "ATTACH 'x.db' AS y",
+            "COPY prices TO 'x.csv'",
+            "PRAGMA database_list",
+            "SELECT 1; SELECT 2",
+            "SELECT * FROM duckdb_settings()",
+            "SELECT * FROM no_such_table",
+            "SELECT * FROM pg_tables",
+            "not valid sql",
+        ] {
+            assert!(validate(&c, sql).is_err(), "should reject: {sql}");
         }
     }
 

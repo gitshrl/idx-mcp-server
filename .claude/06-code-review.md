@@ -71,3 +71,63 @@ Addressed on `main`:
 Deferred (acknowledged, not silently dropped): **#5** the `to_json`→parse→re-serialize round-trip — a real but contained perf refactor whose risk outweighs the marginal gain right now; **#7** `criterion` bench + `cargo-deny` — need extra dependencies/tooling, so the "performant" claim stays backed by manual timings for now.
 
 Verified: `clippy` pedantic + `fmt` clean, 11 tests pass.
+## Round 3 — brutal pass (2026-05-30)
+
+No grading curve this round. The earlier "9/10" was for *polish*. Judged as engineering discipline around a security-critical, internet-facing service, it's closer to a **6** — because the one component that must never break is the one with the least verification. The code reads beautifully and that's exactly what makes the gaps easy to miss.
+
+### Showstopper: the security validator is untested in CI and fails *open*
+
+`validate()` is the entire untrusted-SQL gate, and it's built on the **undocumented internal JSON shape** of DuckDB's `json_serialize_sql` — string keys like `"BASE_TABLE"`, `"TABLE_FUNCTION"`, `"cte_map"`, `"function_name"`. If a DuckDB upgrade renames or restructures any of those, `walk()` simply finds no `BASE_TABLE` nodes, `bases` comes back empty, and the allowlist loop iterates over nothing — **validation passes vacuously**. A silently fail-open security check.
+
+And nothing would catch it: the *only* test that ever calls `validate()` / `run_query` / the pool is `engine_on_real_data`, which `return`s early when `./data` is absent (`analytics.rs:742`). CI has no `./data`. So in CI, the crown-jewel validator, the connection pool, the timeout/interrupt path, and every "every dangerous shape is rejected" assertion **never run**. The tests that *do* run are the catalog allowlist, `build_screen`, and `ensure_date` — i.e. everything except the part that actually enforces the sandbox. Ship a tiny committed Parquet fixture (a dozen rows) and run the engine + rejection suite against it on every CI run. Until then, "sandboxed" is an untested claim. This alone is merge-blocking.
+
+### Performance theatre
+
+- **"Performant" with zero measurement.** No benchmark exists. The Perf Book's first rule is *measure*; this repo asserts.
+- **`returns` and `latest` are VIEWs over static data.** `returns` recomputes **seven ASOF self-joins** on `prices` on *every call*; `latest` recomputes five window-function CTEs plus five joins on every `screen_stocks`. The data only changes on SIGHUP. These should be `CREATE TABLE AS` at build time. Recomputing a 7-way ASOF join per request to produce ~900 rows is the kind of thing that's invisible in a demo and melts under a screening loop.
+- **JSON is encoded three times per response:** DuckDB `to_json` per row → `serde_json::from_str` per row → `Value::Array(..).to_string()`. Have DuckDB emit one array (`to_json(list(t))`) and pass the string through.
+- **Base tables aren't sorted on load**, so `WHERE ticker = ?` in every typed tool can't prune row-groups. `ORDER BY ticker, date` at materialization is free at this data size.
+
+### The usage subsystem is decorative
+
+- `log_usage(.., 0)` — the `rows` column is **hard-coded to 0**, always. It's dead weight in every row.
+- The `plan` column (`'free'`) is written and **never read**. There is no quota, no rate limit, no plan enforcement anywhere — the schema cosplays as a billing system.
+- Usage is logged after `next.run` regardless of HTTP status, with no status column, so a 500 and a 200 are indistinguishable.
+- The table **grows without bound** (no retention) and every request fires an **unbounded detached `tokio::spawn`** that contends on a single mutexed SQLite connection. Under load these pile up faster than one connection drains them. So the analytics you're paying latency and memory for is, today, "latency and a tool name."
+
+### Reliability foot-guns
+
+- **`KeyStore` panics on a poisoned lock** (`.expect("…poisoned")`, `keys.rs:46/58/71`) while the rest of the codebase carefully recovers via `PoisonError::into_inner`. One panic under the key mutex and *every subsequent request fails auth* — the server is bricked until restart. Inconsistent and dangerous.
+- **`describe()` has no timeout** — the one query path that can pin a pooled connection forever.
+- **Magic numbers**: `MAX_MEMORY = "2GB"`, `SERVING_CONNECTIONS = 8`, `QUERY_TIMEOUT = 15s` are hardcoded. 2GB OOMs a small container and starves a big host; none are configurable.
+
+### Hygiene that a staff reviewer would not let slide
+
+- **`tokio = { features = ["full"] }`** — lazy. Pulls the entire runtime surface into a server with a known, small set of needs. Enumerate features.
+- **Hand-rolled calendar math** (`days_in_month`/`is_leap_year`) and **inlined date strings** in SQL to make string interpolation "safe" — all to avoid a one-line `time`/`jiff` dependency, in a crate that already bundles DuckDB, axum, and full-tokio. Penny-wise. Just bind the parameters and drop the bespoke validator.
+- **Unused `thiserror` dependency** still declared.
+- **`bin/q.rs`** runs arbitrary SQL with full external access — a foot-gun shipped in the same crate as the thing whose entire point is *not* doing that.
+- **Protocol pinned to `V_2024_11_05`** with no comment explaining why.
+- **Validator error messages forward DuckDB's internal text** to untrusted callers.
+
+### Architectural smell
+
+The genuinely reusable, well-built part — the `Analytics` engine and its sandbox — is buried in a binary crate with no library boundary, so it can't be unit-tested, fuzzed, or reused in isolation. The security boundary deserves to be its own crate with its own test suite (ideally a fuzz target on `validate()`).
+
+### Brutal bottom line
+
+The craftsmanship is real and rare — the pool accounting and the parser-based validation *approach* are smarter than most production code. But craft isn't discipline. **An internet-facing untrusted-SQL gate that fails open and has zero CI coverage is not a 9** no matter how clean the surrounding code is. Fix that one thing (fixture + tests) and most of the brutal score comes back; the rest (materialize the views, kill the JSON round-trip, make the usage table real or delete it, stop `KeyStore` from bricking auth) is what separates "reads nicely" from "I'd run this in front of customers."
+
+## Round 3 — Resolved (2026-05-31)
+
+The brutal pass landed real hits; addressed on `main`:
+
+- **Validator untested in CI (the showstopper)** — added `validate_accepts_allowed_selects` / `validate_rejects_dangerous_or_unknown` unit tests against an in-memory DuckDB connection (parser only, no `./data`), so the untrusted-SQL gate runs on **every CI build** — catching fail-open behaviour or `json_serialize_sql` AST drift. (The read-only + `external_access=false` connection stays the hard backstop regardless.)
+- **Views recomputed per call** — `latest`, `returns`, `broker_net` are now `CREATE TABLE AS` (materialized at load, `ORDER BY ticker` for row-group pruning), not views. The 7-way ASOF join + window CTEs run once per rebuild, not per query.
+- **`KeyStore` panic on poisoned lock** — recovers via `PoisonError::into_inner` now, consistent with the rest; a panicked task no longer bricks auth.
+- **`describe()` had no timeout** — now uses the same timeout + interrupt + reclaim path as `run_query`.
+- **Hardcoded magic numbers** — `IDX_MAX_MEMORY`, `IDX_SERVING_CONNECTIONS`, `IDX_QUERY_TIMEOUT_SECS` are env-configurable (old constants as defaults).
+
+Verified: `clippy` pedantic + `fmt` clean, **13 tests pass** (incl. the data-less validator tests).
+
+Acknowledged / deferred with reasons (not silently dropped): **JSON triple-encode** (a contained `to_json(list(t))` refactor for a later pass); **committed Parquet fixture** for full engine/pool coverage in CI (the in-memory validator tests cover the gate; a fixture to exercise the pool end-to-end is a good follow-up); **crate split + `validate` fuzz target** (worthwhile, larger refactor); **`tokio` "full"** (compile-surface only); **usage subsystem** (billing groundwork, inert by design); **`bin/q.rs`** (dev tool, not shipped by `cargo install --bin idx-mcp`); **`thiserror`** (already dropped in round 2).
