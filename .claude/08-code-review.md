@@ -1,6 +1,6 @@
 # Code Review
 
-Senior-Rust review of the server (`src/`, ~1,900 LOC). Companion to `01-architecture.md`. Reviewed by reading, not by compiling — the bundled DuckDB build was not run, so "compiles clean / passes pedantic clippy" is assumed, not verified.
+Senior-Rust review of the server (`src/`, ~1,900 LOC). Companion to `04-architecture.md`. Reviewed by reading, not by compiling — the bundled DuckDB build was not run, so "compiles clean / passes pedantic clippy" is assumed, not verified.
 
 **Overall: 8/10.** Production-leaning, security-first, idiomatic Rust. A few real concurrency and operational issues, plus thin tests on the security-relevant code, keep it out of the 9–10 range.
 

@@ -1,4 +1,4 @@
-> Docs index: see [llms.txt](llms.txt) to discover all pages.
+> Docs index: see [the index](01-index.md) to discover all pages.
 
 # Quick Start
 
@@ -27,7 +27,7 @@ claude mcp add --transport http idx http://127.0.0.1:8080/mcp \
   --header "Authorization: Bearer <your-key>"
 ```
 
-See [MCP Server](mcp-server.md) for Cursor and other clients.
+See [MCP Server](03-mcp-server.md) for Cursor and other clients.
 
 ## 4. Call a tool
 
@@ -45,4 +45,4 @@ The shortcut tools take a `ticker` and (for time series) optional `from` / `to` 
 
 Or just ask your agent: *"What were BBCA's daily prices in Q1 2026?"* — or something derived: *"which IDX stocks returned about 20%/year?"*, which the agent answers with `run_query` over the `returns` view.
 
-Browse every tool in [llms.txt](llms.txt).
+Browse every tool in [the index](01-index.md).

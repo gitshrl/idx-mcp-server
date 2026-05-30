@@ -1,10 +1,10 @@
 # Architecture
 
-System design for the IDX Market-Data MCP server. Status and quickstart live in the root `README.md`; the per-dataset column contract lives in `02-data-contract.md`.
+System design for the IDX Market-Data MCP server. Status and quickstart live in the root `README.md`; the per-dataset column contract lives in `05-data-contract.md`.
 
 ## Goal & boundary
 
-A Rust MCP server that exposes Indonesian market data as MCP tools, querying Parquet via embedded DuckDB. **This repo is the server** (+ a dev ETL loader). The **production** ETL that lands Parquet daily is a separate external system; `02-data-contract.md` is the contract between them.
+A Rust MCP server that exposes Indonesian market data as MCP tools, querying Parquet via embedded DuckDB. **This repo is the server** (+ a dev ETL loader). The **production** ETL that lands Parquet daily is a separate external system; `05-data-contract.md` is the contract between them.
 
 ## System
 
@@ -27,7 +27,7 @@ DuckDB reads the local `./data` mirror in dev (`IDX_DATA_DIR`) and R2 directly i
 
 ## Datasets
 
-12 source-neutral datasets (see `README.md` for the table with row counts, and `02-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). Two datasets are ETL-combined (`broker_activity`, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%). At startup the server loads every dataset into one locked, read-only DuckDB **serving database** and builds three analytical views over the tables — `latest` (per-ticker snapshot for screening), `returns` (trailing + annualized returns via `ASOF JOIN`), `broker_net` (per-broker net flow). `SIGHUP` (or `idx-mcp refresh`, planned) rebuilds and atomically swaps it.
+12 source-neutral datasets (see `README.md` for the table with row counts, and `05-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). Two datasets are ETL-combined (`broker_activity`, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%). At startup the server loads every dataset into one locked, read-only DuckDB **serving database** and builds three analytical views over the tables — `latest` (per-ticker snapshot for screening), `returns` (trailing + annualized returns via `ASOF JOIN`), `broker_net` (per-broker net flow). `SIGHUP` (or `idx-mcp refresh`, planned) rebuilds and atomically swaps it.
 
 ## MCP tools
 

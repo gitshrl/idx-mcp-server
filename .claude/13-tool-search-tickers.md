@@ -1,4 +1,4 @@
-> Docs index: see [llms.txt](../llms.txt) to discover all pages.
+> Docs index: see [the index](01-index.md) to discover all pages.
 
 # search_tickers
 

@@ -1,6 +1,6 @@
 # Sources
 
-Where the raw data comes from, and the original collection inventory. The **served** datasets and their column contract are in `02-data-contract.md`.
+Where the raw data comes from, and the original collection inventory. The **served** datasets and their column contract are in `05-data-contract.md`.
 
 ## Upstream sources
 

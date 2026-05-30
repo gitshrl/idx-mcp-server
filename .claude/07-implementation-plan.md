@@ -1,6 +1,6 @@
 # Implementation Plan — v1: Flexible Q&A on the IDX data
 
-> Resolved via a full design grill. Companion to `01-architecture.md` (design), `02-data-contract.md` (the data spec), `llms.txt` (index). OAuth 2.1 + accounts is a **separate, deferred** track (see `01-architecture.md` §Auth).
+> Resolved via a full design grill. Companion to `04-architecture.md` (design), `05-data-contract.md` (the data spec), `01-index.md` (index). OAuth 2.1 + accounts is a **separate, deferred** track (see `04-architecture.md` §Auth).
 
 **Goal:** Let an agent answer open-ended analytical questions over the IDX data — screens, rankings, returns, broker-flow/bandarmology, foreign-flow — through a flexible SQL tool plus a few typed shortcuts, with untrusted SQL sandboxed.
 
@@ -38,7 +38,7 @@ EXTERNAL ETL (separate repo) ──writes Parquet──►  the 12 lean renamed 
     run_query                  → sqlparser-validated single SELECT over the same tables/views
 ```
 
-The MCP server stays **egress-free** — all Mongo export, future XBRL ingest, and future PDF download/extract live in the external ETL. The dev `src/bin/etl.rs` is the local loader; `02-data-contract.md` is the spec the external ETL meets.
+The MCP server stays **egress-free** — all Mongo export, future XBRL ingest, and future PDF download/extract live in the external ETL. The dev `src/bin/etl.rs` is the local loader; `05-data-contract.md` is the spec the external ETL meets.
 
 ### The 12 renamed tables (lean columns; `D`=double `I`=bigint `V`=varchar `T`=timestamp `B`=bool)
 
@@ -67,12 +67,12 @@ Snapshots (latest per ticker):
 ## Milestones
 
 ### M0 — Contract rewrite (docs only; gates code)
-- [ ] Rewrite `02-data-contract.md` to the **12 lean renamed tables** above + the 3 views; drop the raw-tier / 4-tier model entirely (no `04-raw-tier.md`). Document: `broker_distribution` explode, `announcements.attachments`, `ownership` ≥1%, per-table coercion landmines, and the "add later" deferrals (keystats 90-metric tree, json matrices, profile explodes, <1% holders, extra yf fields).
-- [ ] Update `01-architecture.md` §Datasets (loaded serving DB + views, no raw tier) and `03-sources.md` (map each source → renamed table). Update `llms.txt`.
+- [ ] Rewrite `05-data-contract.md` to the **12 lean renamed tables** above + the 3 views; drop the raw-tier / 4-tier model entirely (no `04-raw-tier.md`). Document: `broker_distribution` explode, `announcements.attachments`, `ownership` ≥1%, per-table coercion landmines, and the "add later" deferrals (keystats 90-metric tree, json matrices, profile explodes, <1% holders, extra yf fields).
+- [ ] Update `04-architecture.md` §Datasets (loaded serving DB + views, no raw tier) and `06-sources.md` (map each source → renamed table). Update `01-index.md`.
 - **Verify:** no "raw tier" / 4-tier references remain; markdown renders.
 
 ### M1 — Static catalog (`src/catalog.rs`)
-- [ ] `DatasetDoc`/`ColumnDoc` for the 12 tables + 3 views (transcribed from `02-data-contract.md`); `ALLOWED_TABLES` (the 12 + 3 view names); `describe_json()`.
+- [ ] `DatasetDoc`/`ColumnDoc` for the 12 tables + 3 views (transcribed from `05-data-contract.md`); `ALLOWED_TABLES` (the 12 + 3 view names); `describe_json()`.
 - [ ] Tests: no dup names; `DATASETS ⊆ ALLOWED_TABLES`; `describe_json()` serializes.
 
 ### M2 — Sandboxed analytics engine (`src/analytics.rs`) — buildable NOW on `./data`
@@ -92,7 +92,7 @@ Snapshots (latest per ticker):
 
 ### M4 — screen_stocks + docs
 - [ ] `screen_stocks`: `filters:[{field,op,value}]` (ANDed) + `sort` + `limit` over the `latest` view; `SCREEN_FIELDS` allowlist (`market_cap, trailing_pe, forward_pe, price_to_book, dividend_yield, return_on_equity, profit_margins, revenue_growth, earnings_growth, debt_to_equity, beta, close, volume, rsi_14, free_float_pct, sector`); ops `= != < <= > >= between` (num) / `= in` (sector); field+op exact-matched, values bound.
-- [ ] Tool docs (run_query, describe_schema, screen_stocks) + reframe the 6 shortcut pages ("use run_query for derived"); update `llms.txt`.
+- [ ] Tool docs (run_query, describe_schema, screen_stocks) + reframe the 6 shortcut pages ("use run_query for derived"); update `01-index.md`.
 - **Verify:** `tools/list` shows 9; a screen + a returns query return sane rows; injection on field/op rejected.
 
 ### M5 — Dev ETL extension (`src/bin/etl.rs`) — parallel with M1–M4

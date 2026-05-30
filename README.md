@@ -53,11 +53,11 @@ Any MCP client: point it at the Streamable HTTP endpoint `http://<host>:8080/mcp
 
 ## Docs
 
-Index: [`.claude/llms.txt`](.claude/llms.txt). Highlights:
+Index: [`.claude/01-index.md`](.claude/01-index.md). Highlights:
 
-- [`.claude/quickstart.md`](.claude/quickstart.md) — connect and make your first tool call.
-- [`.claude/mcp-server.md`](.claude/mcp-server.md) — endpoint, auth, clients.
-- [`.claude/tools/`](.claude/tools) — per-tool reference (one page each).
-- [`.claude/01-architecture.md`](.claude/01-architecture.md) — design, datasets, auth/OAuth plan.
-- [`.claude/02-data-contract.md`](.claude/02-data-contract.md) — data contract (source field → column).
-- [`.claude/03-sources.md`](.claude/03-sources.md) — upstream sources and collection inventory.
+- [`.claude/02-quickstart.md`](.claude/02-quickstart.md) — connect and make your first tool call.
+- [`.claude/03-mcp-server.md`](.claude/03-mcp-server.md) — endpoint, auth, clients.
+- [`.claude/04-architecture.md`](.claude/04-architecture.md) — design, datasets, sandbox, auth/OAuth plan.
+- [`.claude/05-data-contract.md`](.claude/05-data-contract.md) — data contract (source field → column).
+- [`.claude/06-sources.md`](.claude/06-sources.md) — upstream sources and collection inventory.
+- per-tool reference: files `10`–`18` (`run_query`, `screen_stocks`, …), all listed in the index.
