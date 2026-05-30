@@ -1,4 +1,4 @@
-//! Tiny ad-hoc DuckDB query tool for inspecting ./data. `cargo run --bin q -- "<sql>"`.
+//! Tiny ad-hoc `DuckDB` query tool for inspecting ./data. `cargo run --bin q -- "<sql>"`.
 use duckdb::Connection;
 
 fn main() -> anyhow::Result<()> {

@@ -1,8 +1,9 @@
+mod analytics;
 mod auth;
+mod catalog;
 mod config;
 mod keys;
 mod server;
-mod store;
 
 use std::sync::Arc;
 
@@ -16,11 +17,11 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+use crate::analytics::Analytics;
 use crate::auth::{AuthState, auth_middleware};
 use crate::config::Config;
 use crate::keys::KeyStore;
 use crate::server::IdxServer;
-use crate::store::Store;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,14 +48,24 @@ async fn main() -> Result<()> {
     }
 
     let keys = Arc::new(KeyStore::open(&cfg.sqlite_path)?);
-    let store = Arc::new(Store::open(&cfg)?);
-    tracing::info!(base = store.base(), "data source ready");
+
+    // Build the loaded, locked, read-only serving database. Fails fast if no
+    // data could be loaded.
+    let analytics = Arc::new(Analytics::new(&cfg)?);
+    tracing::info!(
+        tables = ?analytics.loaded_tables(),
+        views = ?analytics.loaded_views(),
+        "serving database ready"
+    );
+
+    // SIGHUP rebuilds the serving database in place (manual refresh).
+    spawn_sighup_refresh(analytics.clone());
 
     let ct = CancellationToken::new();
 
-    let factory_store = store.clone();
+    let factory_analytics = analytics.clone();
     let mcp: StreamableHttpService<IdxServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(IdxServer::new(factory_store.clone())),
+        move || Ok(IdxServer::new(factory_analytics.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );
@@ -76,4 +87,27 @@ async fn main() -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Rebuild the serving database whenever the process receives SIGHUP. The
+/// rebuild runs on a blocking thread; on failure the previous data is kept.
+fn spawn_sighup_refresh(analytics: Arc<Analytics>) {
+    tokio::spawn(async move {
+        let mut hup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot install SIGHUP handler");
+                return;
+            }
+        };
+        while hup.recv().await.is_some() {
+            tracing::info!("SIGHUP received: rebuilding serving database");
+            let a = analytics.clone();
+            match tokio::task::spawn_blocking(move || a.rebuild()).await {
+                Ok(Ok(())) => tracing::info!("serving database rebuilt"),
+                Ok(Err(e)) => tracing::error!(error = %e, "rebuild failed; keeping previous data"),
+                Err(e) => tracing::error!(error = %e, "rebuild task panicked"),
+            }
+        }
+    });
 }

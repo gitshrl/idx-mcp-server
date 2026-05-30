@@ -45,7 +45,7 @@ pub async fn auth_middleware(
 
     let start = Instant::now();
     let response = next.run(request).await;
-    let latency_ms = start.elapsed().as_millis() as i64;
+    let latency_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
     if let Err(e) = state.keys.log_usage(key_id, "mcp", latency_ms, 0) {
         tracing::warn!(error = %e, "usage logging failed");
     }

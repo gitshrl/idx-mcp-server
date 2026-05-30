@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -23,7 +24,7 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 ";
 
-/// API-key + usage store backed by SQLite. Keys are stored only as SHA-256
+/// API-key + usage store backed by `SQLite`. Keys are stored only as SHA-256
 /// hashes; the plaintext is shown once at creation and never persisted.
 pub struct KeyStore {
     conn: Mutex<Connection>,
@@ -82,7 +83,7 @@ fn generate_key() -> String {
     let mut s = String::with_capacity(4 + bytes.len() * 2);
     s.push_str("idx_");
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -90,9 +91,9 @@ fn generate_key() -> String {
 fn hash_key(key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let mut s = String::with_capacity(64);
+    for b in hasher.finalize() {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }

@@ -5,7 +5,7 @@ use std::env;
 pub enum DataBase {
     /// Local directory holding parquet, e.g. "./data".
     Local(String),
-    /// Cloudflare R2 bucket read via DuckDB httpfs. `base` is like "r2://idx-data".
+    /// Cloudflare R2 bucket read via `DuckDB` httpfs. `base` is like `r2://idx-data`.
     R2 {
         base: String,
         account_id: String,

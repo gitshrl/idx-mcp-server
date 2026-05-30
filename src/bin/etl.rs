@@ -1,8 +1,8 @@
 //! Dev ETL — processes ALL exported Mongo data into contract Parquet.
 //!
 //! Reads the full Mongo export (every row, every served collection) from
-//! /tmp/etl/*.jsonl, runs the per-dataset DuckDB transforms in
-//! /tmp/etl/etl_statements.json (canonical ticker/date, daily date partitions,
+//! /tmp/etl/*.jsonl, runs the per-dataset `DuckDB` transforms in
+//! `/tmp/etl/etl_statements.json` (canonical ticker/date, daily date partitions,
 //! flatten/explode/combine/filter per the field-map contract), and writes
 //! Parquet under ./data. Each statement runs independently so one failure
 //! doesn't abort the rest.
