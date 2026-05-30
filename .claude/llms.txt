@@ -11,6 +11,7 @@
 - [Sources](03-sources.md): Upstream sources and the raw collection inventory.
 - [Implementation Plan](05-implementation-plan.md): milestones for complex Q&A + full data coverage.
 - [Code Review](06-code-review.md): senior-Rust review findings and how they were resolved.
+- [Scenario Q&A corpus](08-scenario-qa.md): 100 complex investment-scenario questions answered with reasoning + tool queries + real-ticker picks (a test corpus; machine-readable in `scenario-corpus.json`).
 
 ## Tools
 
