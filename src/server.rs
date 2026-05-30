@@ -27,6 +27,12 @@ pub struct IdxServer {
     tool_router: ToolRouter<IdxServer>,
 }
 
+impl std::fmt::Debug for IdxServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdxServer").finish_non_exhaustive()
+    }
+}
+
 // ---- tool request types (schemas auto-derived from these) ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -43,6 +49,16 @@ pub struct TickerReq {
     pub ticker: String,
 }
 
+/// Price data source for `get_prices`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PriceSource {
+    /// Yahoo-adjusted OHLCV (default).
+    Yf,
+    /// Official IDX end-of-day summary, with foreign flow.
+    Idx,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PricesReq {
     /// IDX ticker symbol, e.g. "BBCA".
@@ -51,8 +67,8 @@ pub struct PricesReq {
     pub from: Option<String>,
     /// Inclusive end date, YYYY-MM-DD.
     pub to: Option<String>,
-    /// Price source: "yf" (Yahoo OHLCV, default) or "idx" (official summary + foreign flow).
-    pub source: Option<String>,
+    /// Price source: `yf` (Yahoo OHLCV, default) or `idx` (official summary + foreign flow).
+    pub source: Option<PriceSource>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -193,8 +209,8 @@ impl IdxServer {
         &self,
         Parameters(req): Parameters<PricesReq>,
     ) -> Result<CallToolResult, McpError> {
-        let (cols, table) = match req.source.as_deref() {
-            Some("idx") => (
+        let (cols, table) = match req.source {
+            Some(PriceSource::Idx) => (
                 "ticker, date, open, high, low, close, previous, change, volume, value, \
                  frequency, foreign_buy, foreign_sell",
                 "eod_summary",

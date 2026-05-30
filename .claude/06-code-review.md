@@ -41,3 +41,33 @@ All four issues and the minors were addressed on `main`:
 - **Minors** — `ensure_date` does full calendar validation (rejects e.g. `2025-02-31`); `MAX_ROWS` hoisted into `catalog`; typed-tool failures return a generic message (raw DuckDB text only logged); `ILIKE` escapes `%`/`_` via `ESCAPE '\'`; `DataBase` has a redacting `Debug`.
 
 Verified: `clippy` pedantic + `fmt` clean, 11 tests pass, live MCP e2e 9/9.
+
+## Round 2 — measured against the "10x" Rust bar (2026-05-30)
+
+After the resolution above the code is a solid **9/10**. This round benchmarks it against the canonical references — the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/checklist.html), [The Rust Performance Book](https://nnethercote.github.io/perf-book/), [Effective Rust](https://www.lurklurk.org/effective-rust/), and the idiomatic-Rust consensus — to find what separates it from a literal 10/10. These are **polish, not correctness**; the design-level things the guidelines weigh most (safety, validation, error handling, no `unsafe`, enforced lints) are already done.
+
+Remaining items, each tied to a standard:
+
+1. **No `[profile.release]` tuning** *(Perf Book — Build Configuration)*. Add `lto = "fat"` and `codegen-units = 1`. **Do NOT add `panic = "abort"`**: the pool and auth deliberately recover from panicked `spawn_blocking` tasks (`permit.forget()` / task-panicked arms), and `panic=abort` would abort the whole process on any panicked query, defeating that isolation. A `mimalloc` global allocator is a real win given the per-row JSON allocation churn.
+2. **Unused dependency `thiserror`** *(Necessities / hygiene)* — declared in `Cargo.toml`, referenced nowhere in `src/`. Drop it; consider `cargo-machete`/`cargo-udeps` in CI.
+3. **Stringly-typed argument** *(API Guidelines C-CUSTOM-TYPE; Effective Rust "use the type system")* — `PricesReq.source: Option<String>` matched against `"idx"` should be `enum PriceSource { Yf, Idx }` deserialized by serde, so illegal values are rejected at parse time.
+4. **`Debug` not on all public types** *(API Guidelines C-DEBUG)* — request structs derive it, but `IdxServer`, `Analytics`, `QueryOutput` don't (`Analytics` needs a manual impl since `Connection` isn't `Debug`).
+5. **Avoidable JSON allocations** *(Perf Book — "minimize allocations")* — the `to_json → parse to Value → re-serialize to String` round-trip (`collect_json` + `json_array`) double-encodes. Collect raw JSON `Vec<String>` and join, or aggregate with `json_group_array` in DuckDB.
+6. **No `# Errors`/`# Panics` doc sections** *(API Guidelines C-FAILURE)* — not enforced (`clippy::missing_errors_doc` skips binary crates) but wanted on the public `Analytics` methods returning `Result`.
+7. **CI missing supply-chain + perf gates** *(Necessities + "measure first")* — add `cargo-deny` (license/advisory audit) and a `criterion` benchmark on `run_query`/`build_screen`, so the "performant" claim is measured, not asserted.
+
+Highest value: profile tuning minus `panic=abort` (1), drop the unused dep (2), `PriceSource` enum (3), the JSON-allocation fix (5), and a benchmark (7).
+
+## Round 2 — Resolved (2026-05-31)
+
+Addressed on `main`:
+
+- **#1 release tuning** — `[profile.release] lto = "fat"`, `codegen-units = 1`. `panic = "abort"` deliberately omitted (it would defeat the pool/auth panic isolation, as the review flagged). `mimalloc` skipped for now (extra dependency).
+- **#2 unused `thiserror`** — dropped from `Cargo.toml`.
+- **#3 stringly-typed source** — `PricesReq.source` is now `enum PriceSource { Yf, Idx }` (serde `rename_all = "lowercase"`), so illegal values fail at parse and the tool schema advertises the choices.
+- **#4 `Debug` on public types** — `QueryOutput` derives it; `Analytics` and `IdxServer` have manual impls (`Connection` isn't `Debug`).
+- **#6 `# Errors` docs** — added to the public `Analytics` methods (`new`, `rebuild`, `run_query`, `query_json`, `describe`).
+
+Deferred (acknowledged, not silently dropped): **#5** the `to_json`→parse→re-serialize round-trip — a real but contained perf refactor whose risk outweighs the marginal gain right now; **#7** `criterion` bench + `cargo-deny` — need extra dependencies/tooling, so the "performant" claim stays backed by manual timings for now.
+
+Verified: `clippy` pedantic + `fmt` clean, 11 tests pass.

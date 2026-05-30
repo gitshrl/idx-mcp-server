@@ -38,6 +38,7 @@ const SERVING_CONNECTIONS: usize = 8;
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 /// Result of a `run_query` call.
+#[derive(Debug)]
 pub struct QueryOutput {
     pub rows: Vec<Value>,
     /// True if the row cap was hit and results were cut.
@@ -135,9 +136,21 @@ pub struct Analytics {
     version: AtomicU64,
 }
 
+impl std::fmt::Debug for Analytics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Analytics")
+            .field("tables", &self.loaded_tables().len())
+            .field("views", &self.loaded_views().len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Analytics {
     /// Build the serving database from the configured data source and open it
     /// read-only. Fails fast if no datasets could be loaded.
+    ///
+    /// # Errors
+    /// Fails if the serving directory can't be created or no datasets load.
     pub fn new(cfg: &AppConfig) -> Result<Self> {
         let source = match &cfg.data_base {
             DataBase::Local(dir) => Source {
@@ -206,6 +219,9 @@ impl Analytics {
 
     /// Rebuild the serving database and atomically swap it in. Manual: invoked
     /// at boot and on `SIGHUP` / `idx-mcp refresh`.
+    ///
+    /// # Errors
+    /// Fails if no dataset can be loaded; the existing DB is left in place.
     pub fn rebuild(&self) -> Result<()> {
         let version = self.version.fetch_add(1, Ordering::SeqCst);
         let serving = build_and_open(&self.source, &self.dir, version)?;
@@ -225,6 +241,9 @@ impl Analytics {
 
     /// Run untrusted SQL: validate, execute with a row cap and timeout, on an
     /// exclusively checked-out connection so the timeout interrupts only it.
+    ///
+    /// # Errors
+    /// Invalid or disallowed SQL, an exceeded time limit, or a backend failure.
     pub async fn run_query(&self, sql: &str, limit: Option<usize>) -> Result<QueryOutput> {
         let sql = sql.trim().trim_end_matches(';').trim().to_string();
         if sql.is_empty() {
@@ -263,6 +282,9 @@ impl Analytics {
 
     /// Run a trusted, parameterized query (the typed shortcut tools). The SQL
     /// is server-authored; `params` are bound, never interpolated.
+    ///
+    /// # Errors
+    /// Propagates a backend query failure or an exceeded time limit.
     pub async fn query_json(&self, sql: String, params: Vec<String>) -> Result<Vec<Value>> {
         let serving = self.current();
         let (permit, slot) = serving.checkout().await?;
@@ -293,6 +315,9 @@ impl Analytics {
 
     /// Schema description: catalog docs merged with live columns from the
     /// serving database. `only` restricts to one table/view.
+    ///
+    /// # Errors
+    /// Propagates a backend failure introspecting the serving database.
     pub async fn describe(&self, only: Option<String>) -> Result<Value> {
         let serving = self.current();
         let mut relations: Vec<(String, &'static str)> = Vec::new();
