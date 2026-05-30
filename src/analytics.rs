@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -28,7 +28,9 @@ use crate::config::{Config as AppConfig, DataBase};
 const MAX_ROWS: usize = 5_000;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_MEMORY: &str = "2GB";
-const SERVING_THREADS: i64 = 2;
+/// Read-only connections over one shared locked instance, round-robined so
+/// queries run concurrently instead of serializing on a single connection.
+const SERVING_CONNECTIONS: usize = 8;
 
 /// Monotonic id so each engine instance gets its own serving directory.
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -57,16 +59,32 @@ impl Source {
     }
 }
 
-/// A built serving database with the handles to query and interrupt it.
-///
-/// Queries serialize on the `conn` Mutex (one `DuckDB` connection) — fine for the
-/// current volume. Pool multiple read-only connections if it becomes a bottleneck.
-struct Serving {
+/// One read-only connection to the shared serving instance, with its own
+/// interrupt handle for the timeout path.
+#[derive(Clone)]
+struct ConnSlot {
     conn: Arc<Mutex<Connection>>,
     interrupt: Arc<InterruptHandle>,
+}
+
+/// A built serving database: a pool of read-only connections over one shared,
+/// locked instance (one buffer pool, one memory budget), round-robined so
+/// queries run concurrently.
+struct Serving {
+    conns: Vec<ConnSlot>,
+    next: AtomicUsize,
     path: PathBuf,
     tables: Vec<String>,
     views: Vec<String>,
+}
+
+impl Serving {
+    /// Round-robin a connection. Distinct picks run concurrently; a collision
+    /// merely serializes on that one connection's mutex.
+    fn pick(&self) -> ConnSlot {
+        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
+        self.conns[i].clone()
+    }
 }
 
 /// The analytics engine. One per process; cloneable handle via `Arc`.
@@ -171,8 +189,7 @@ impl Analytics {
         }
         let cap = limit.map_or(MAX_ROWS, |n| n.min(MAX_ROWS)).max(1);
         let serving = self.current();
-        let conn = serving.conn.clone();
-        let interrupt = serving.interrupt.clone();
+        let ConnSlot { conn, interrupt } = serving.pick();
 
         let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
@@ -198,8 +215,7 @@ impl Analytics {
     /// is server-authored; `params` are bound, never interpolated.
     pub async fn query_json(&self, sql: String, params: Vec<String>) -> Result<Vec<Value>> {
         let serving = self.current();
-        let conn = serving.conn.clone();
-        let interrupt = serving.interrupt.clone();
+        let ConnSlot { conn, interrupt } = serving.pick();
 
         let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
             let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
@@ -219,7 +235,7 @@ impl Analytics {
     /// serving database. `only` restricts to one table/view.
     pub async fn describe(&self, only: Option<String>) -> Result<Value> {
         let serving = self.current();
-        let conn = serving.conn.clone();
+        let conn = serving.pick().conn;
         let mut relations: Vec<(String, &'static str)> = Vec::new();
         for t in &serving.tables {
             relations.push((t.clone(), "table"));
@@ -399,28 +415,54 @@ SELECT ticker, date, broker_code,
 FROM broker_activity
 GROUP BY ticker, date, broker_code;";
 
-/// Open the built file read-only, lock it down, and grab an interrupt handle.
+/// Open the built file read-only, lock it down, and clone N connections that
+/// share the one locked instance (one buffer pool, one memory budget) so
+/// queries run concurrently. Read-only + external-access-off + lock are
+/// instance-level, so every cloned connection is equally sandboxed.
 fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Result<Serving> {
     let config = Config::default()
         .access_mode(AccessMode::ReadOnly)?
         .enable_external_access(false)?
         .enable_autoload_extension(false)?
         .max_memory(MAX_MEMORY)?
-        .threads(SERVING_THREADS)?;
-    let conn = Connection::open_with_flags(path, config)
+        .threads(serving_threads())?;
+    let primary = Connection::open_with_flags(path, config)
         .with_context(|| format!("open serving db read-only {}", path.display()))?;
-    // Last config action: forbid any further configuration change for this
-    // connection, so external access can never be turned back on.
-    conn.execute_batch("SET lock_configuration = true;")
+    // Last config action: forbid any further configuration change for the
+    // instance, so external access can never be turned back on.
+    primary
+        .execute_batch("SET lock_configuration = true;")
         .context("lock configuration")?;
-    let interrupt = conn.interrupt_handle();
-    Ok(Serving {
-        conn: Arc::new(Mutex::new(conn)),
+
+    let mut conns = Vec::with_capacity(SERVING_CONNECTIONS);
+    for _ in 1..SERVING_CONNECTIONS {
+        let clone = primary.try_clone().context("clone serving connection")?;
+        let interrupt = clone.interrupt_handle();
+        conns.push(ConnSlot {
+            conn: Arc::new(Mutex::new(clone)),
+            interrupt,
+        });
+    }
+    let interrupt = primary.interrupt_handle();
+    conns.push(ConnSlot {
+        conn: Arc::new(Mutex::new(primary)),
         interrupt,
+    });
+
+    Ok(Serving {
+        conns,
+        next: AtomicUsize::new(0),
         path: path.to_path_buf(),
         tables,
         views,
     })
+}
+
+/// Worker threads for the serving instance — the machine's parallelism, clamped
+/// so a query gets real CPU without oversubscribing tiny or huge hosts.
+fn serving_threads() -> i64 {
+    let n = std::thread::available_parallelism().map_or(4, |p| p.get().clamp(2, 16));
+    i64::try_from(n).unwrap_or(4)
 }
 
 /// Validate untrusted SQL using `DuckDB`'s own parser. Guarantees: exactly one
@@ -664,5 +706,17 @@ mod tests {
         let arr = d.as_array().expect("array");
         assert!(arr.iter().any(|r| r["name"] == "prices"));
         assert!(arr.iter().any(|r| r["name"] == "returns"));
+
+        // the connection pool serves concurrent queries without deadlock
+        let (r1, r2, r3, r4) = tokio::join!(
+            a.run_query("SELECT count(*) FROM prices", None),
+            a.run_query("SELECT count(*) FROM companies", None),
+            a.run_query("SELECT count(*) FROM eod_summary", None),
+            a.run_query("SELECT count(*) FROM broker_rankings", None),
+        );
+        assert!(
+            r1.is_ok() && r2.is_ok() && r3.is_ok() && r4.is_ok(),
+            "concurrent pooled queries failed"
+        );
     }
 }

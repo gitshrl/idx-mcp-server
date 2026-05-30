@@ -60,7 +60,7 @@ pub const DATASETS: &[Dataset] = &[
     Dataset {
         name: "broker_distribution",
         kind: Kind::TimeSeries,
-        doc: "Broker-to-broker distribution graph. Grain: ticker+date. by_value/by_volume are nested JSON (edge explode pending).",
+        doc: "Broker-to-broker distribution graph (who traded against whom), as delivered by the ETL — typically exploded edges (ticker, date, side, source/counterparty broker, value, volume). Call describe_schema for the live columns.",
     },
     Dataset {
         name: "broker_rankings",
