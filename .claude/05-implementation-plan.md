@@ -61,7 +61,7 @@ Snapshots (latest per ticker):
 ### The 3 analytical views (built by the loader, over the tables)
 
 - **`latest`** — one row/ticker: latest-of-each-source joined on `ticker` (close+volume from `prices`, rsi/sma from `indicators`, market_cap/free_float from `fundamentals`, pe/pb/roe/yield from `summary`, name/sector from `companies`). Each metric is its own as-of date.
-- **`returns`** — one row/ticker: `ret_1w/1m/3m/6m/ytd/1y/3y` (% close change, nearest trading day on/before each target) + `cagr_1y/cagr_3y` annualized. Powers "which stock did ~20%/yr".
+- **`returns`** — one row/ticker: `ret_1w/1m/3m/6m/ytd/1y/3y` (% close change, nearest trading day on/before each target) + `cagr_3y` annualized. Powers "which stock did ~20%/yr".
 - **`broker_net`** — one row per (ticker, date, broker_code): `buy_value, sell_value, net_value, buy_volume_lot, sell_volume_lot, net_volume_lot`. Base for flip / accumulation / market-maker analysis.
 
 ## Milestones

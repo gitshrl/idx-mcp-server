@@ -526,7 +526,7 @@ fn push_date_range(
 
 fn ensure_date(s: &str) -> Result<(), McpError> {
     let b = s.as_bytes();
-    let ok = b.len() == 10
+    let well_formed = b.len() == 10
         && b.iter().enumerate().all(|(i, c)| {
             if i == 4 || i == 7 {
                 *c == b'-'
@@ -534,11 +534,18 @@ fn ensure_date(s: &str) -> Result<(), McpError> {
                 c.is_ascii_digit()
             }
         });
-    if ok {
+    // Cheap calendar-range check (no chrono dep): reject e.g. 2025-13-32 at the
+    // boundary. Positions are guaranteed ASCII digits once `well_formed`.
+    let valid = well_formed && {
+        let month: u8 = s[5..7].parse().unwrap_or(0);
+        let day: u8 = s[8..10].parse().unwrap_or(0);
+        (1..=12).contains(&month) && (1..=31).contains(&day)
+    };
+    if valid {
         Ok(())
     } else {
         Err(McpError::invalid_params(
-            format!("date must be YYYY-MM-DD, got {s:?}"),
+            format!("date must be a valid YYYY-MM-DD, got {s:?}"),
             None,
         ))
     }

@@ -28,7 +28,7 @@ Discover the schema before writing [run_query](run-query.md) SQL. Returns each b
   {
     "name": "returns",
     "relation": "view",
-    "description": "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_1y/cagr_3y from close prices.",
+    "description": "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_3y from close prices.",
     "columns": [
       {"name": "ticker", "type": "VARCHAR"},
       {"name": "as_of", "type": "DATE"},

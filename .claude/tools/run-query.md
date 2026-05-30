@@ -11,7 +11,7 @@ The flexible core of the server. Write a single read-only `SELECT` over the docu
 **Queryable relations.** The 12 base tables — `prices`, `eod_summary`, `indicators`, `fundamentals`, `broker_activity`, `broker_distribution`, `broker_rankings`, `announcements`, `companies`, `summary`, `analyst`, `ownership` — plus three pre-built views:
 
 * `latest` — one row per ticker: latest close/volume, fundamentals, Yahoo ratios, and key indicators joined. For screening.
-* `returns` — one row per ticker: trailing `ret_1w/1m/3m/6m/ytd/1y/3y` and annualized `cagr_1y/cagr_3y` from close prices.
+* `returns` — one row per ticker: trailing `ret_1w/1m/3m/6m/ytd/1y/3y` and annualized `cagr_3y` from close prices.
 * `broker_net` — one row per ticker+date+broker_code: `buy_value`, `sell_value`, `net_value`, and the volume equivalents. Base for accumulation / flip / market-maker analysis.
 
 **Sandbox.** The query runs against a locked, read-only connection. Only a single `SELECT`/`WITH` is allowed; statements referencing any table outside the list above, file/network functions (`read_parquet`, `read_csv`, …), or any write/DDL/`ATTACH`/`COPY`/`PRAGMA` are rejected. Results are capped at 5000 rows (a `truncated` flag signals when the cap was hit), and queries are interrupted after 15 seconds.

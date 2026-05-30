@@ -110,7 +110,7 @@ pub const VIEWS: &[View] = &[
     View {
         name: "returns",
         requires: &["prices"],
-        doc: "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_1y/cagr_3y from close prices.",
+        doc: "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_3y from close prices.",
     },
     View {
         name: "broker_net",

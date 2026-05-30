@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -58,6 +58,9 @@ impl Source {
 }
 
 /// A built serving database with the handles to query and interrupt it.
+///
+/// Queries serialize on the `conn` Mutex (one `DuckDB` connection) — fine for the
+/// current volume. Pool multiple read-only connections if it becomes a bottleneck.
 struct Serving {
     conn: Arc<Mutex<Connection>>,
     interrupt: Arc<InterruptHandle>,
@@ -124,13 +127,21 @@ impl Analytics {
     /// Names of the loaded base tables, for boot logging.
     #[must_use]
     pub fn loaded_tables(&self) -> Vec<String> {
-        self.serving.read().expect("serving lock").tables.clone()
+        self.serving
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tables
+            .clone()
     }
 
     /// Names of the created analytical views.
     #[must_use]
     pub fn loaded_views(&self) -> Vec<String> {
-        self.serving.read().expect("serving lock").views.clone()
+        self.serving
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .views
+            .clone()
     }
 
     /// Rebuild the serving database and atomically swap it in. Manual: invoked
@@ -139,13 +150,15 @@ impl Analytics {
         let version = self.version.fetch_add(1, Ordering::SeqCst);
         let serving = build_and_open(&self.source, &self.dir, version)?;
         let old = {
-            let mut guard = self.serving.write().expect("serving lock");
+            let mut guard = self.serving.write().unwrap_or_else(PoisonError::into_inner);
             std::mem::replace(&mut *guard, Arc::new(serving))
         };
         // On Linux unlinking an open file is safe; any in-flight query on the
         // old connection keeps reading until it finishes.
-        if !old.path.as_os_str().is_empty() {
-            let _ = std::fs::remove_file(&old.path);
+        if !old.path.as_os_str().is_empty()
+            && let Err(e) = std::fs::remove_file(&old.path)
+        {
+            tracing::warn!(path = %old.path.display(), error = %e, "failed to remove old serving file");
         }
         Ok(())
     }
@@ -162,7 +175,7 @@ impl Analytics {
         let interrupt = serving.interrupt.clone();
 
         let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-            let conn = conn.lock().expect("serving conn poisoned");
+            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             validate(&conn, &sql)?;
             let wrapped = format!(
                 "SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t LIMIT {}",
@@ -189,7 +202,7 @@ impl Analytics {
         let interrupt = serving.interrupt.clone();
 
         let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-            let conn = conn.lock().expect("serving conn poisoned");
+            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let wrapped = format!("SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t");
             let bound: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
             collect_json(&conn, &wrapped, &bound)
@@ -216,7 +229,7 @@ impl Analytics {
         }
 
         let task = tokio::task::spawn_blocking(move || -> Result<Value> {
-            let conn = conn.lock().expect("serving conn poisoned");
+            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
             let mut out = Vec::new();
             for (name, relkind) in relations {
                 if only
@@ -239,7 +252,10 @@ impl Analytics {
     }
 
     fn current(&self) -> Arc<Serving> {
-        self.serving.read().expect("serving lock").clone()
+        self.serving
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -299,7 +315,10 @@ fn create_views(conn: &Connection, tables: &[String]) -> Vec<String> {
             tracing::warn!(view = view.name, "skipping view (missing inputs)");
             continue;
         }
-        let sql = view_sql(view.name);
+        let Some(sql) = view_sql(view.name) else {
+            tracing::warn!(view = view.name, "no SQL defined for view; skipping");
+            continue;
+        };
         match conn.execute_batch(sql) {
             Ok(()) => created.push(view.name.to_string()),
             Err(e) => tracing::warn!(view = view.name, error = %e, "skipping view (create failed)"),
@@ -308,12 +327,12 @@ fn create_views(conn: &Connection, tables: &[String]) -> Vec<String> {
     created
 }
 
-fn view_sql(name: &str) -> &'static str {
+fn view_sql(name: &str) -> Option<&'static str> {
     match name {
-        "latest" => LATEST_VIEW,
-        "returns" => RETURNS_VIEW,
-        "broker_net" => BROKER_NET_VIEW,
-        _ => unreachable!("unknown view {name}"),
+        "latest" => Some(LATEST_VIEW),
+        "returns" => Some(RETURNS_VIEW),
+        "broker_net" => Some(BROKER_NET_VIEW),
+        _ => None,
     }
 }
 
@@ -358,7 +377,6 @@ SELECT lc.ticker, lc.as_of, lc.close,
   100.0 * (lc.close / NULLIF(wyt.close, 0) - 1) AS ret_ytd,
   100.0 * (lc.close / NULLIF(w1y.close, 0) - 1) AS ret_1y,
   100.0 * (lc.close / NULLIF(w3y.close, 0) - 1) AS ret_3y,
-  100.0 * (lc.close / NULLIF(w1y.close, 0) - 1) AS cagr_1y,
   100.0 * (power(lc.close / NULLIF(w3y.close, 0), 1.0 / 3.0) - 1) AS cagr_3y
 FROM lc
 ASOF LEFT JOIN prices w1w ON w1w.ticker = lc.ticker AND w1w.date <= lc.as_of - INTERVAL '7 days'
@@ -543,8 +561,11 @@ fn clear_serving_files(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("serving-") && name.ends_with(".duckdb") {
-            let _ = std::fs::remove_file(entry.path());
+        if name.starts_with("serving-")
+            && name.ends_with(".duckdb")
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            tracing::warn!(path = %entry.path().display(), error = %e, "failed to remove stale serving file");
         }
     }
 }
