@@ -14,18 +14,20 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use duckdb::{AccessMode, Config, Connection, InterruptHandle, ToSql};
 use serde_json::Value;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 
 use crate::catalog::{self, Kind};
 use crate::config::{Config as AppConfig, DataBase};
 
-const MAX_ROWS: usize = 5_000;
+const MAX_ROWS: usize = catalog::MAX_ROWS as usize;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_MEMORY: &str = "2GB";
 /// Read-only connections over one shared locked instance, round-robined so
@@ -60,31 +62,69 @@ impl Source {
 }
 
 /// One read-only connection to the shared serving instance, with its own
-/// interrupt handle for the timeout path.
-#[derive(Clone)]
+/// interrupt handle. Held exclusively for the duration of a query, so its
+/// interrupt always targets that query — never a neighbour's.
 struct ConnSlot {
-    conn: Arc<Mutex<Connection>>,
+    conn: Connection,
     interrupt: Arc<InterruptHandle>,
 }
 
 /// A built serving database: a pool of read-only connections over one shared,
-/// locked instance (one buffer pool, one memory budget), round-robined so
-/// queries run concurrently.
+/// locked instance (one buffer pool, one memory budget). Connections are
+/// checked out exclusively, so N queries run concurrently and a query's timeout
+/// can only interrupt its own connection.
 struct Serving {
-    conns: Vec<ConnSlot>,
-    next: AtomicUsize,
+    idle: Mutex<Vec<ConnSlot>>,
+    permits: Arc<Semaphore>,
     path: PathBuf,
     tables: Vec<String>,
     views: Vec<String>,
 }
 
 impl Serving {
-    /// Round-robin a connection. Distinct picks run concurrently; a collision
-    /// merely serializes on that one connection's mutex.
-    fn pick(&self) -> ConnSlot {
-        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.conns.len();
-        self.conns[i].clone()
+    /// Check out a connection, waiting if all are busy. The permit is held for
+    /// the query's lifetime; `checkin` (or `forget` on loss) keeps the permit
+    /// count equal to the number of idle connections.
+    async fn checkout(&self) -> Result<(OwnedSemaphorePermit, ConnSlot)> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("serving pool closed"))?;
+        let slot = self
+            .idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .expect("a held permit guarantees an idle connection");
+        Ok((permit, slot))
     }
+
+    /// Return a connection to the pool. The caller drops its permit afterward.
+    fn checkin(&self, slot: ConnSlot) {
+        self.idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(slot);
+    }
+}
+
+/// Reclaim a connection after a timed-out (interrupted) query finally stops, so
+/// a slow query never permanently shrinks the pool. On panic the slot is gone,
+/// so the permit is forgotten to keep `permits == idle.len()`.
+fn spawn_reclaim<T: Send + 'static>(
+    serving: Arc<Serving>,
+    task: JoinHandle<(ConnSlot, T)>,
+    permit: OwnedSemaphorePermit,
+) {
+    tokio::spawn(async move {
+        match task.await {
+            Ok((slot, _)) => {
+                serving.checkin(slot);
+                drop(permit);
+            }
+            Err(_) => permit.forget(),
+        }
+    });
 }
 
 /// The analytics engine. One per process; cloneable handle via `Arc`.
@@ -121,6 +161,8 @@ impl Analytics {
             |_| std::env::temp_dir().join("idx-mcp-serving"),
             PathBuf::from,
         );
+        // Reap serving dirs left by processes that have since died (crash/restart).
+        clear_dead_instances(&root);
         // Unique per engine instance so concurrent instances never share files.
         let dir = root.join(format!(
             "{}-{}",
@@ -181,7 +223,8 @@ impl Analytics {
         Ok(())
     }
 
-    /// Run untrusted SQL: validate, execute with a row cap and timeout.
+    /// Run untrusted SQL: validate, execute with a row cap and timeout, on an
+    /// exclusively checked-out connection so the timeout interrupts only it.
     pub async fn run_query(&self, sql: &str, limit: Option<usize>) -> Result<QueryOutput> {
         let sql = sql.trim().trim_end_matches(';').trim().to_string();
         if sql.is_empty() {
@@ -189,53 +232,69 @@ impl Analytics {
         }
         let cap = limit.map_or(MAX_ROWS, |n| n.min(MAX_ROWS)).max(1);
         let serving = self.current();
-        let ConnSlot { conn, interrupt } = serving.pick();
+        let (permit, slot) = serving.checkout().await?;
+        let interrupt = slot.interrupt.clone();
 
-        let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            validate(&conn, &sql)?;
-            let wrapped = format!(
-                "SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t LIMIT {}",
-                cap + 1
-            );
-            collect_json(&conn, &wrapped, &[])
+        let mut task = tokio::task::spawn_blocking(move || -> (ConnSlot, Result<Vec<Value>>) {
+            let result = exec_validated(&slot.conn, &sql, cap);
+            (slot, result)
         });
 
-        let Ok(joined) = tokio::time::timeout(QUERY_TIMEOUT, task).await else {
-            interrupt.interrupt();
-            bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs());
-        };
-        let mut rows = joined.context("query task failed")??;
-        let truncated = rows.len() > cap;
-        rows.truncate(cap);
-        Ok(QueryOutput { rows, truncated })
+        match tokio::time::timeout(QUERY_TIMEOUT, &mut task).await {
+            Ok(Ok((slot, result))) => {
+                serving.checkin(slot);
+                drop(permit);
+                let mut rows = result?;
+                let truncated = rows.len() > cap;
+                rows.truncate(cap);
+                Ok(QueryOutput { rows, truncated })
+            }
+            Ok(Err(_)) => {
+                permit.forget();
+                bail!("query task failed")
+            }
+            Err(_) => {
+                interrupt.interrupt();
+                spawn_reclaim(serving, task, permit);
+                bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs())
+            }
+        }
     }
 
     /// Run a trusted, parameterized query (the typed shortcut tools). The SQL
     /// is server-authored; `params` are bound, never interpolated.
     pub async fn query_json(&self, sql: String, params: Vec<String>) -> Result<Vec<Value>> {
         let serving = self.current();
-        let ConnSlot { conn, interrupt } = serving.pick();
+        let (permit, slot) = serving.checkout().await?;
+        let interrupt = slot.interrupt.clone();
 
-        let task = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
-            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            let wrapped = format!("SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t");
-            let bound: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
-            collect_json(&conn, &wrapped, &bound)
+        let mut task = tokio::task::spawn_blocking(move || -> (ConnSlot, Result<Vec<Value>>) {
+            let result = exec_params(&slot.conn, &sql, &params);
+            (slot, result)
         });
 
-        let Ok(joined) = tokio::time::timeout(QUERY_TIMEOUT, task).await else {
-            interrupt.interrupt();
-            bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs());
-        };
-        joined.context("query task failed")?
+        match tokio::time::timeout(QUERY_TIMEOUT, &mut task).await {
+            Ok(Ok((slot, result))) => {
+                serving.checkin(slot);
+                drop(permit);
+                result
+            }
+            Ok(Err(_)) => {
+                permit.forget();
+                bail!("query task failed")
+            }
+            Err(_) => {
+                interrupt.interrupt();
+                spawn_reclaim(serving, task, permit);
+                bail!("query exceeded the {}s time limit", QUERY_TIMEOUT.as_secs())
+            }
+        }
     }
 
     /// Schema description: catalog docs merged with live columns from the
     /// serving database. `only` restricts to one table/view.
     pub async fn describe(&self, only: Option<String>) -> Result<Value> {
         let serving = self.current();
-        let conn = serving.pick().conn;
         let mut relations: Vec<(String, &'static str)> = Vec::new();
         for t in &serving.tables {
             relations.push((t.clone(), "table"));
@@ -244,27 +303,18 @@ impl Analytics {
             relations.push((v.clone(), "view"));
         }
 
-        let task = tokio::task::spawn_blocking(move || -> Result<Value> {
-            let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut out = Vec::new();
-            for (name, relkind) in relations {
-                if only
-                    .as_deref()
-                    .is_some_and(|want| !want.eq_ignore_ascii_case(&name))
-                {
-                    continue;
-                }
-                let cols = describe_columns(&conn, &name)?;
-                out.push(serde_json::json!({
-                    "name": name,
-                    "relation": relkind,
-                    "description": catalog::doc_for(&name).unwrap_or(""),
-                    "columns": cols,
-                }));
-            }
-            Ok(Value::Array(out))
+        let (permit, slot) = serving.checkout().await?;
+        let task = tokio::task::spawn_blocking(move || -> (ConnSlot, Result<Value>) {
+            let result = describe_relations(&slot.conn, &relations, only.as_deref());
+            (slot, result)
         });
-        task.await.context("describe task failed")?
+        let Ok((slot, result)) = task.await else {
+            permit.forget();
+            bail!("describe task failed");
+        };
+        serving.checkin(slot);
+        drop(permit);
+        result
     }
 
     fn current(&self) -> Arc<Serving> {
@@ -434,24 +484,24 @@ fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Resu
         .execute_batch("SET lock_configuration = true;")
         .context("lock configuration")?;
 
-    let mut conns = Vec::with_capacity(SERVING_CONNECTIONS);
+    let mut slots = Vec::with_capacity(SERVING_CONNECTIONS);
     for _ in 1..SERVING_CONNECTIONS {
         let clone = primary.try_clone().context("clone serving connection")?;
         let interrupt = clone.interrupt_handle();
-        conns.push(ConnSlot {
-            conn: Arc::new(Mutex::new(clone)),
+        slots.push(ConnSlot {
+            conn: clone,
             interrupt,
         });
     }
     let interrupt = primary.interrupt_handle();
-    conns.push(ConnSlot {
-        conn: Arc::new(Mutex::new(primary)),
+    slots.push(ConnSlot {
+        conn: primary,
         interrupt,
     });
 
     Ok(Serving {
-        conns,
-        next: AtomicUsize::new(0),
+        permits: Arc::new(Semaphore::new(slots.len())),
+        idle: Mutex::new(slots),
         path: path.to_path_buf(),
         tables,
         views,
@@ -463,6 +513,26 @@ fn open_serving_ro(path: &Path, tables: Vec<String>, views: Vec<String>) -> Resu
 fn serving_threads() -> i64 {
     let n = std::thread::available_parallelism().map_or(4, |p| p.get().clamp(2, 16));
     i64::try_from(n).unwrap_or(4)
+}
+
+/// Remove serving directories left by processes that are no longer alive
+/// (`<pid>-<instance>` dirs whose pid has no `/proc` entry), so the serving root
+/// doesn't accumulate across restarts and crashes.
+fn clear_dead_instances(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let me = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(pid) = name.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid != me && !Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Validate untrusted SQL using `DuckDB`'s own parser. Guarantees: exactly one
@@ -574,6 +644,45 @@ fn collect_json(conn: &Connection, wrapped: &str, params: &[&dyn ToSql]) -> Resu
         out.push(serde_json::from_str(&json).context("parse row json")?);
     }
     Ok(out)
+}
+
+/// Validate and run untrusted SQL (the `run_query` body), capping rows.
+fn exec_validated(conn: &Connection, sql: &str, cap: usize) -> Result<Vec<Value>> {
+    validate(conn, sql)?;
+    let wrapped = format!(
+        "SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t LIMIT {}",
+        cap + 1
+    );
+    collect_json(conn, &wrapped, &[])
+}
+
+/// Run a trusted, parameterized query (the typed shortcut tools).
+fn exec_params(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Value>> {
+    let wrapped = format!("SELECT to_json(t)::VARCHAR AS j FROM ({sql}) AS t");
+    let bound: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
+    collect_json(conn, &wrapped, &bound)
+}
+
+/// Build the schema description for the given relations (optionally one).
+fn describe_relations(
+    conn: &Connection,
+    relations: &[(String, &'static str)],
+    only: Option<&str>,
+) -> Result<Value> {
+    let mut out = Vec::new();
+    for (name, relkind) in relations {
+        if only.is_some_and(|want| !want.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let cols = describe_columns(conn, name)?;
+        out.push(serde_json::json!({
+            "name": name,
+            "relation": relkind,
+            "description": catalog::doc_for(name).unwrap_or(""),
+            "columns": cols,
+        }));
+    }
+    Ok(Value::Array(out))
 }
 
 /// Live `(name, type)` column list for one relation.

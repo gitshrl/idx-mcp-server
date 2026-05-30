@@ -22,27 +22,34 @@ pub struct AuthState {
 
 /// Bearer-API-key gate, applied as the outermost layer so it runs on every
 /// request (including the MCP `initialize` handshake) before the MCP handler.
-/// On success it logs a usage row tagged with the called tool.
+/// `SQLite` work (key verify, usage logging) runs on a blocking thread, and the
+/// usage write is fired off the response path so it never adds request latency.
 pub async fn auth_middleware(
     State(state): State<AuthState>,
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let key = headers
+    let Some(key) = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let Some(key) = key else {
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_owned)
+    else {
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let key_id = match state.keys.verify(key) {
-        Ok(Some(id)) => id,
-        Ok(None) => return Err(StatusCode::UNAUTHORIZED),
-        Err(e) => {
+    // Verify off the async runtime — rusqlite is blocking.
+    let keys = state.keys.clone();
+    let key_id = match tokio::task::spawn_blocking(move || keys.verify(&key)).await {
+        Ok(Ok(Some(id))) => id,
+        Ok(Ok(None)) => return Err(StatusCode::UNAUTHORIZED),
+        Ok(Err(e)) => {
             tracing::error!(error = %e, "api key verification failed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "verify task panicked");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
@@ -59,9 +66,18 @@ pub async fn auth_middleware(
     let start = Instant::now();
     let response = next.run(request).await;
     let latency_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
-    if let Err(e) = state.keys.log_usage(key_id, &tool, latency_ms, 0) {
-        tracing::warn!(error = %e, "usage logging failed");
-    }
+
+    // Log usage off the request path so the SQLite write never delays the reply.
+    let keys = state.keys.clone();
+    tokio::spawn(async move {
+        match tokio::task::spawn_blocking(move || keys.log_usage(key_id, &tool, latency_ms, 0))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "usage logging failed"),
+            Err(e) => tracing::warn!(error = %e, "usage logging task panicked"),
+        }
+    });
 
     Ok(response)
 }

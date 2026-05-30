@@ -10,6 +10,7 @@
 - [Data Contract](02-data-contract.md): Source field → canonical column, per dataset.
 - [Sources](03-sources.md): Upstream sources and the raw collection inventory.
 - [Implementation Plan](05-implementation-plan.md): milestones for complex Q&A + full data coverage.
+- [Code Review](06-code-review.md): senior-Rust review findings and how they were resolved.
 
 ## Tools
 

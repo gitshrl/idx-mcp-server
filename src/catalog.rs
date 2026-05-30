@@ -6,6 +6,9 @@
 //! (`describe_schema`), so it can never drift from the data — this file owns
 //! only what the engine can't infer: semantics, grain, and what's allowed.
 
+/// Hard cap on the rows any tool returns — single source of truth.
+pub const MAX_ROWS: u32 = 5_000;
+
 /// How a dataset is laid out under the data root.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

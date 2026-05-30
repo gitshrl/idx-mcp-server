@@ -1,7 +1,7 @@
 use std::env;
 
 /// Where the Parquet data lives. Local dir for dev, R2 for prod.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum DataBase {
     /// Local directory holding parquet, e.g. "./data".
     Local(String),
@@ -12,6 +12,24 @@ pub enum DataBase {
         key_id: String,
         secret: String,
     },
+}
+
+// Manual Debug so a stray `{cfg:?}` can never leak the R2 credentials.
+impl std::fmt::Debug for DataBase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(dir) => f.debug_tuple("Local").field(dir).finish(),
+            Self::R2 {
+                base, account_id, ..
+            } => f
+                .debug_struct("R2")
+                .field("base", base)
+                .field("account_id", account_id)
+                .field("key_id", &"<redacted>")
+                .field("secret", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

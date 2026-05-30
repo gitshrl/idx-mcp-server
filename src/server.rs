@@ -15,7 +15,7 @@ use crate::catalog;
 
 // Every served relation exposes `ticker` (UPPERCASE) and, for time series,
 // `date` (DATE). Tools query the loaded serving database, never Parquet files.
-const MAX_ROWS: u32 = 5_000;
+const MAX_ROWS: u32 = catalog::MAX_ROWS;
 
 /// The IDX market-data MCP server. One instance per session; all share the
 /// analytics engine.
@@ -137,9 +137,9 @@ impl IdxServer {
         let limit = req.limit.unwrap_or(20).min(MAX_ROWS);
         let sql = format!(
             "SELECT ticker, company_name, sector, exchange FROM companies \
-             WHERE ticker ILIKE ? OR company_name ILIKE ? LIMIT {limit}"
+             WHERE ticker ILIKE ? ESCAPE '\\' OR company_name ILIKE ? ESCAPE '\\' LIMIT {limit}"
         );
-        let pattern = format!("%{}%", req.query);
+        let pattern = format!("%{}%", escape_like(&req.query));
         let rows = self
             .analytics
             .query_json(sql, vec![pattern.clone(), pattern])
@@ -487,7 +487,23 @@ fn num(v: &Value) -> Result<String, McpError> {
 // Both are used as `.map_err(_)` adaptors, which hand over an owned error.
 #[allow(clippy::needless_pass_by_value)]
 fn mcp_err(e: anyhow::Error) -> McpError {
-    McpError::internal_error(e.to_string(), None)
+    // Log the detail; return a generic message so raw DuckDB internals aren't
+    // forwarded to clients (the typed tools shouldn't fail on valid input).
+    tracing::warn!(error = %e, "tool query failed");
+    McpError::internal_error("internal error processing the request", None)
+}
+
+/// Escape LIKE/ILIKE wildcards in user input so `%`/`_` are matched literally
+/// (paired with `ESCAPE '\'` in the query).
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -534,12 +550,14 @@ fn ensure_date(s: &str) -> Result<(), McpError> {
                 c.is_ascii_digit()
             }
         });
-    // Cheap calendar-range check (no chrono dep): reject e.g. 2025-13-32 at the
-    // boundary. Positions are guaranteed ASCII digits once `well_formed`.
+    // Full calendar validation (no chrono dep): reject bad months and
+    // out-of-range days, incl. Feb and the 30-day months. Positions are ASCII
+    // digits once `well_formed`.
     let valid = well_formed && {
+        let year: i32 = s[0..4].parse().unwrap_or(0);
         let month: u8 = s[5..7].parse().unwrap_or(0);
         let day: u8 = s[8..10].parse().unwrap_or(0);
-        (1..=12).contains(&month) && (1..=31).contains(&day)
+        (1..=12).contains(&month) && day >= 1 && day <= days_in_month(year, month)
     };
     if valid {
         Ok(())
@@ -548,5 +566,131 @@ fn ensure_date(s: &str) -> Result<(), McpError> {
             format!("date must be a valid YYYY-MM-DD, got {s:?}"),
             None,
         ))
+    }
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn filter(field: &str, op: &str, value: Value) -> ScreenFilter {
+        ScreenFilter {
+            field: field.to_string(),
+            op: op.to_string(),
+            value,
+        }
+    }
+    fn screen(filters: Vec<ScreenFilter>) -> ScreenReq {
+        ScreenReq {
+            filters,
+            sort: None,
+            limit: Some(10),
+        }
+    }
+
+    #[test]
+    fn screen_numeric_filter_binds_and_casts() {
+        let Ok((sql, params)) = build_screen(&screen(vec![filter(
+            "market_cap",
+            ">",
+            json!(1_000_000_000u64),
+        )])) else {
+            panic!("valid screen rejected");
+        };
+        assert!(
+            sql.contains("\"market_cap\" > CAST(? AS DOUBLE)"),
+            "sql: {sql}"
+        );
+        assert!(sql.contains("FROM latest"));
+        assert_eq!(params, vec!["1000000000".to_string()]);
+    }
+
+    #[test]
+    fn screen_between_and_sector_in() {
+        let Ok((_, p1)) = build_screen(&screen(vec![filter(
+            "price_to_book",
+            "between",
+            json!([0, 1.5]),
+        )])) else {
+            panic!("between rejected");
+        };
+        assert_eq!(p1.len(), 2);
+        let Ok((sql, p2)) = build_screen(&screen(vec![filter(
+            "sector",
+            "in",
+            json!(["Financials", "Energy"]),
+        )])) else {
+            panic!("in rejected");
+        };
+        assert!(sql.contains("\"sector\" IN (?, ?)"), "sql: {sql}");
+        assert_eq!(p2, vec!["Financials".to_string(), "Energy".to_string()]);
+    }
+
+    #[test]
+    fn screen_rejects_injection_and_bad_ops() {
+        assert!(build_screen(&screen(vec![filter("evil\"; DROP", "=", json!(1))])).is_err());
+        assert!(build_screen(&screen(vec![filter("market_cap", "like", json!(1))])).is_err());
+        assert!(build_screen(&screen(vec![filter("sector", ">", json!("x"))])).is_err());
+        assert!(build_screen(&screen(vec![filter("market_cap", ">", json!("nan-ish"))])).is_err());
+    }
+
+    #[test]
+    fn screen_sort_field_allowlisted() {
+        let ok = ScreenReq {
+            filters: vec![],
+            sort: Some(ScreenSort {
+                field: "dividend_yield".to_string(),
+                desc: Some(true),
+            }),
+            limit: None,
+        };
+        assert!(build_screen(&ok).is_ok());
+        let bad = ScreenReq {
+            filters: vec![],
+            sort: Some(ScreenSort {
+                field: "evil".to_string(),
+                desc: None,
+            }),
+            limit: None,
+        };
+        assert!(build_screen(&bad).is_err());
+    }
+
+    #[test]
+    fn ensure_date_validates_calendar() {
+        assert!(ensure_date("2026-05-31").is_ok());
+        assert!(ensure_date("2024-02-29").is_ok()); // leap year
+        for bad in [
+            "2026-13-01",
+            "2026-00-10",
+            "2026-02-31",
+            "2026-04-31",
+            "2025-02-29",
+            "2026-1-1",
+            "not-a-date",
+            "20260531",
+        ] {
+            assert!(ensure_date(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn escape_like_escapes_wildcards() {
+        assert_eq!(escape_like("a%b_c\\d"), "a\\%b\\_c\\\\d");
     }
 }
