@@ -200,19 +200,21 @@ Grain: one row per `ticker` (latest). Columns: `ticker, date(updated_at), rec_st
 
 ---
 
-## Tool → dataset map (server)
+## Tool → relation map (server)
 
-| tool | datasets | notes |
+The server loads each served dataset into one read-only serving database and adds the views `latest` (per-ticker snapshot), `returns` (trailing/annualized returns), `broker_net` (per-broker net flow). Datasets without a typed shortcut (`indicators`, `analyst`, `broker_distribution`, `broker_rankings`) are reached through `run_query`.
+
+| tool | relations | notes |
 |---|---|---|
-| `search_tickers` | stockprofiles | match ticker/company_name |
-| `get_company` | stockprofiles + keystats(latest) + yfsummary | flag yf ratio reliability |
-| `get_prices` | yfdaily (default) / idxstocksummary (`source=idx`) | |
-| `get_broker_activity` | brokersummary (+ brokerdistribution) | broker rows + bandar signal; reject if no ticker |
-| `get_broker_summary` | idxbrokersummary | broker league table; **by date/broker, not ticker** |
-| `get_ownership` | kseiownership | summary + ≥1% holders |
-| `get_announcements` | announcements | dedup locale twins |
-| `get_indicators` | yfindicators | |
-| `get_analyst` | yfanalyst | |
+| `run_query` | any table + `latest` / `returns` / `broker_net` | read-only SELECT; allowlisted + sandboxed |
+| `describe_schema` | (catalog) | live tables/views + columns |
+| `screen_stocks` | `latest` | typed cross-sectional filter/sort |
+| `search_tickers` | `companies` | match ticker/company_name |
+| `get_company` | `companies` + `fundamentals`(latest) + `summary` | flag yf ratio reliability |
+| `get_prices` | `prices` (default) / `eod_summary` (`source=idx`) | |
+| `get_broker_activity` | `broker_activity` | per-broker buy/sell rows |
+| `get_ownership` | `ownership` | ≥1% holders |
+| `get_announcements` | `announcements` | dedup locale twins |
 
 ## Validation before freezing (run a full-collection profile)
 

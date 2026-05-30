@@ -8,6 +8,10 @@
 
 ---
 
+## Status (2026-05-31)
+
+**Built + verified** — `clippy`/`fmt`/tests green and a 9/9 live MCP end-to-end run (`scripts/e2e.sh`): the serving engine (`analytics.rs`), the catalog + allowlist (`catalog.rs`), all 9 tools, the `latest`/`returns`/`broker_net` views, and SIGHUP refresh. **Deviation from the plan:** SQL validation uses DuckDB's own parser (`json_serialize_sql`) instead of `sqlparser` — zero dialect drift, no extra dependency. **Remaining:** `broker_distribution` currently loads as nested JSON (the edge-explode is external-ETL work, M5); the financials + filings tiers stay deferred as planned.
+
 ## Locked decisions (the grill outcomes)
 
 1. **Unify on one DB.** All tools query a single loaded, locked **read-only DuckDB serving DB**. The current live-`read_parquet` path is retired. (`run_query` *forces* a sandboxed conn with external access OFF, which forces materialized tables; serving the shortcuts from the same tables gives one schema, one security surface, faster reads, single source of truth.)

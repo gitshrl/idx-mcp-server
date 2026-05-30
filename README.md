@@ -1,6 +1,6 @@
 # idx-mcp-server
 
-A remote MCP server that gives AI agents Indonesian (IDX) market data — prices, fundamentals, broker flow (bandarmology), KSEI ownership, and corporate announcements. Tools query columnar Parquet through an embedded DuckDB, so there is no database to run; data lives in object storage (Cloudflare R2) or a local directory.
+A remote MCP server that gives AI agents Indonesian (IDX) market data — prices, fundamentals, broker flow (bandarmology), KSEI ownership, and corporate announcements. Agents query it with read-only SQL (`run_query`) or typed shortcuts; the server loads columnar Parquet into a locked, read-only embedded DuckDB at startup, so there is no database to run. Data lives in object storage (Cloudflare R2) or a local directory.
 
 ## Install
 
@@ -47,7 +47,9 @@ Any MCP client: point it at the Streamable HTTP endpoint `http://<host>:8080/mcp
 
 ## Tools
 
-`search_tickers` · `get_company` · `get_prices` · `get_broker_activity` · `get_ownership` · `get_announcements`
+`run_query` · `describe_schema` · `screen_stocks` · `search_tickers` · `get_company` · `get_prices` · `get_broker_activity` · `get_ownership` · `get_announcements`
+
+`run_query` is the flexible core — read-only SQL over the tables plus the `latest`, `returns`, and `broker_net` views, sandboxed (single SELECT, allowlisted tables, no file access). The rest are typed shortcuts.
 
 ## Docs
 

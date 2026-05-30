@@ -18,7 +18,7 @@ A Rust MCP server that exposes Indonesian market data as MCP tools, querying Par
                          │   public:  /.well-known/*  /oauth/*           │  ← (planned) no auth
                          │   /mcp  .layer(auth: api_key OR oauth token)  │  ← tower, per-request
                          │          .nest_service StreamableHttpService  │  ← rmcp 1.7
-                         │   tools → DuckDB → read_parquet(...)           │
+                         │   tools → locked read-only serving DuckDB     │
                          └──────────────────┬───────────────────────────┘
                                             ▼  SQLite: accounts, api_keys, usage, oauth_*
 ```
@@ -27,15 +27,19 @@ DuckDB reads the local `./data` mirror in dev (`IDX_DATA_DIR`) and R2 directly i
 
 ## Datasets
 
-12 source-neutral datasets (see `README.md` for the table with row counts, and `02-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). Two datasets are ETL-combined (`broker_activity`, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%).
+12 source-neutral datasets (see `README.md` for the table with row counts, and `02-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). Two datasets are ETL-combined (`broker_activity`, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%). At startup the server loads every dataset into one locked, read-only DuckDB **serving database** and builds three analytical views over the tables — `latest` (per-ticker snapshot for screening), `returns` (trailing + annualized returns via `ASOF JOIN`), `broker_net` (per-broker net flow). `SIGHUP` (or `idx-mcp refresh`, planned) rebuilds and atomically swaps it.
 
 ## MCP tools
 
-Defined with `rmcp`'s `#[tool_router]`/`#[tool]` macros; each takes `Parameters<T>` (`serde::Deserialize` + `schemars::JsonSchema`, auto JSON-Schema). Output is a **curated explicit column projection** per dataset (no `SELECT *`; partition/internal columns stripped). All in `src/server.rs`; `src/store.rs` owns DuckDB access (`query_json` wraps each query in DuckDB `to_json(row)`).
+Defined with `rmcp`'s `#[tool_router]`/`#[tool]` macros; each takes `Parameters<T>` (`serde::Deserialize` + `schemars::JsonSchema`, auto JSON-Schema). All in `src/server.rs`; every tool queries the loaded serving database via `src/analytics.rs` (`query_json` wraps each query in DuckDB `to_json(row)`).
 
-**Live (6):** `search_tickers`, `get_company` (profile+fundamentals+summary), `get_prices` (`source=yf|idx`), `get_broker_activity` (bandarmology), `get_ownership` (KSEI ≥1%), `get_announcements`. **Buildable (datasets ready, tools TODO):** `get_indicators`, `get_analyst`, `get_broker_summary`.
+**Flexible core (3):** `run_query` (read-only SQL over the tables + the `latest`/`returns`/`broker_net` views — the tool for any derived/analytical question), `describe_schema` (live tables/columns + semantics), `screen_stocks` (typed cross-sectional filter/sort over `latest`). **Typed shortcuts (6, curated column projections):** `search_tickers`, `get_company` (profile+fundamentals+summary), `get_prices` (`source=yf|idx`), `get_broker_activity` (bandarmology), `get_ownership` (KSEI ≥1%), `get_announcements`.
 
-`get_broker_activity` + `get_ownership` are the IDX-specific moat (broker-attributed flow, KSEI local/foreign split — no US/global equivalent) → gate behind paid tier when monetizing.
+`run_query` runs untrusted SQL → sandboxed (see §Query engine). `get_broker_activity` + `get_ownership` + broker-flow `run_query` are the IDX-specific moat (broker-attributed flow, KSEI local/foreign split — no US/global equivalent) → gate behind paid tier when monetizing.
+
+## Query engine (sandbox)
+
+`run_query` accepts arbitrary SQL, so the serving connection is the security boundary. The loader (a trusted read-write connection) materializes each Parquet dataset into a table and builds the views, then the file is reopened through a **locked read-only** connection: `access_mode=ReadOnly`, `enable_external_access=false` (kills `read_parquet`/httpfs/`COPY`/`ATTACH`/`INSTALL`), extension autoload off, `max_memory=2GB`, `threads=2`, then `SET lock_configuration=true` last so none of it can be turned back on. On top, a validator parses each query with DuckDB's **own** parser (`json_serialize_sql` — zero dialect drift, no extra dependency) and rejects anything that isn't exactly one SELECT, references a table outside the catalog allowlist, or calls a file/network table function. A 15s timeout interrupts runaway queries (external `spawn_blocking` + `InterruptHandle`); results cap at 5000 rows with a `truncated` flag. The typed shortcuts run server-authored, parameterized SQL on the same connection.
 
 ## Auth & accounts
 
@@ -85,10 +89,11 @@ idx-mcp-server/
   src/
     main.rs      # tokio main, `keys add` CLI, rmcp+axum wiring, auth layer, serve
     config.rs    # Config from env (bind, sqlite, DataBase: Local dir | R2)
-    store.rs     # DuckDB conn + R2 secret; query_json via DuckDB to_json()
+    analytics.rs # locked read-only serving DuckDB: loader, views, SQL validator, query exec, refresh
+    catalog.rs   # static dataset/view catalog + run_query table allowlist + screen fields
     keys.rs      # SQLite api_keys/usage; key gen/hash, verify, log_usage
     auth.rs      # Bearer tower middleware + usage logging  (+ oauth validation, planned)
-    server.rs    # IdxServer: #[tool_router] with the tools + ServerHandler
+    server.rs    # IdxServer: #[tool_router] with the 9 tools + ServerHandler
     oauth.rs     # (planned) AS: metadata + register + authorize + token
     bin/etl.rs   # dev ETL: Mongo JSONL -> contract Parquet under ./data
     bin/q.rs     # ad-hoc DuckDB query tool for ./data
@@ -105,6 +110,7 @@ Single binary crate (one consumer ⇒ no workspace/`idx-core`). Extra binaries (
 4. **Daily `date` partitioning** — matches daily ingestion; date-range pruning; new day = new partition, no rewrite.
 5. **Hand-rolled opaque-token AS** — smallest correct design for single-instance; reuses the SHA-256-in-SQLite pattern.
 6. **No Docker** — deploy the release binary via systemd behind a TLS reverse proxy.
+7. **Loaded serving DB over live `read_parquet`** — one schema, one security surface, fast queries. `run_query` needs `enable_external_access=false`, which forbids `read_parquet` at query time → datasets are materialized into tables and curated layers are views over them. Untrusted SQL is validated by DuckDB's own parser (no dialect drift, no `sqlparser` dependency).
 
 ## Risks
 

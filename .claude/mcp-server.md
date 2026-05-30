@@ -6,7 +6,7 @@
 
 ## Overview
 
-The server speaks MCP over **Streamable HTTP** at `/mcp`. Any MCP client can connect, authenticate with an API key, and call the tools listed in [llms.txt](llms.txt). Tools query Parquet through an embedded DuckDB — there is no database to operate.
+The server speaks MCP over **Streamable HTTP** at `/mcp`. Any MCP client can connect, authenticate with an API key, and call the tools listed in [llms.txt](llms.txt). Tools query a loaded, read-only DuckDB serving database (built from the Parquet at startup) — there is no separate database to operate. The flexible `run_query` tool runs read-only SQL; the typed shortcuts cover common lookups.
 
 ## Authentication
 

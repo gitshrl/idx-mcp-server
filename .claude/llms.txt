@@ -13,6 +13,9 @@
 
 ## Tools
 
+- [run_query](tools/run-query.md): Run read-only SQL over the data plus the `latest`/`returns`/`broker_net` views — the flexible tool for any derived or analytical question.
+- [describe_schema](tools/describe-schema.md): List the queryable tables and views with their columns and types.
+- [screen_stocks](tools/screen-stocks.md): Cross-sectional screen (filter + sort) over the per-ticker latest snapshot.
 - [search_tickers](tools/search-tickers.md): Find IDX tickers by symbol or company name.
 - [get_company](tools/get-company.md): Company profile, key statistics, and market summary for a ticker.
 - [get_prices](tools/get-prices.md): Daily OHLCV price history — Yahoo-adjusted or IDX official (with foreign flow).

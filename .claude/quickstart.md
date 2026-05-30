@@ -31,7 +31,7 @@ See [MCP Server](mcp-server.md) for Cursor and other clients.
 
 ## 4. Call a tool
 
-Every tool takes a `ticker` and (for time series) optional `from` / `to` dates. Raw MCP request:
+The shortcut tools take a `ticker` and (for time series) optional `from` / `to` dates; the flexible `run_query` takes a SQL string and `screen_stocks` takes filters. Raw MCP request:
 
 ```json
 {
@@ -43,6 +43,6 @@ Every tool takes a `ticker` and (for time series) optional `from` / `to` dates. 
 }
 ```
 
-Or just ask your agent: *"What were BBCA's daily prices in Q1 2026?"*
+Or just ask your agent: *"What were BBCA's daily prices in Q1 2026?"* — or something derived: *"which IDX stocks returned about 20%/year?"*, which the agent answers with `run_query` over the `returns` view.
 
 Browse every tool in [llms.txt](llms.txt).
