@@ -51,6 +51,11 @@ Any MCP client: point it at the Streamable HTTP endpoint `http://<host>:8080/mcp
 
 ## Docs
 
-- `.claude/01-architecture.md` — design, datasets, auth/OAuth plan, decisions.
-- `.claude/02-data-contract.md` — the data contract (source field → column, per dataset).
-- `.claude/03-sources.md` — upstream sources and collection inventory.
+Index: [`.claude/llms.txt`](.claude/llms.txt). Highlights:
+
+- [`.claude/quickstart.md`](.claude/quickstart.md) — connect and make your first tool call.
+- [`.claude/mcp-server.md`](.claude/mcp-server.md) — endpoint, auth, clients.
+- [`.claude/tools/`](.claude/tools) — per-tool reference (one page each).
+- [`.claude/01-architecture.md`](.claude/01-architecture.md) — design, datasets, auth/OAuth plan.
+- [`.claude/02-data-contract.md`](.claude/02-data-contract.md) — data contract (source field → column).
+- [`.claude/03-sources.md`](.claude/03-sources.md) — upstream sources and collection inventory.

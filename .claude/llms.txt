@@ -1,0 +1,25 @@
+# IDX Market-Data MCP
+
+> A remote MCP server that gives AI agents Indonesian (IDX) market data — prices, fundamentals, broker flow (bandarmology), KSEI ownership, and corporate announcements — served from Parquet via an embedded DuckDB.
+
+## Docs
+
+- [Quick Start](quickstart.md): Connect a client and make your first tool call.
+- [MCP Server](mcp-server.md): Connect the remote MCP server — endpoint, auth, clients.
+- [Architecture](01-architecture.md): System design, datasets, auth/OAuth plan, decisions, risks.
+- [Data Contract](02-data-contract.md): Source field → canonical column, per dataset.
+- [Sources](03-sources.md): Upstream sources and the raw collection inventory.
+- [Implementation Plan](05-implementation-plan.md): milestones for complex Q&A + full data coverage.
+
+## Tools
+
+- [search_tickers](tools/search-tickers.md): Find IDX tickers by symbol or company name.
+- [get_company](tools/get-company.md): Company profile, key statistics, and market summary for a ticker.
+- [get_prices](tools/get-prices.md): Daily OHLCV price history — Yahoo-adjusted or IDX official (with foreign flow).
+- [get_broker_activity](tools/get-broker-activity.md): Per-broker buy/sell flow (bandarmology) for a ticker over a date range.
+- [get_ownership](tools/get-ownership.md): KSEI depository holders ≥1%, with local/foreign split.
+- [get_announcements](tools/get-announcements.md): IDX corporate announcements and news.
+
+## Optional
+
+- [Repository](https://github.com/gitshrl/idx-mcp-server)
