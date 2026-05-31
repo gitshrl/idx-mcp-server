@@ -33,7 +33,7 @@ get_filing { url }
         │ err → fetch_via_browser(url)     ← fallback: chromiumoxide clears CF, page fetch
         ▼
    verify %PDF magic → pdf_extract::extract_text_from_mem (blocking thread)
-        → cache (in-memory, by url) → return
+        → cache (L1 in-memory + L2 SQLite, by url) → return
 ```
 
 **Security boundary held:** its own tool handler. `run_query` stays a locked,
@@ -56,7 +56,9 @@ notice → 6039-byte PDF → 2476 chars of extracted text. Both paths covered by
 - **Crates:** `wreq` (Chrome TLS/HTTP-2 emulation) + `wreq-util`
   (`Emulation::Chrome137`) + `chromiumoxide` (headless-browser fallback) +
   `pdf-extract` (pure-Rust text).
-- **Caching:** in-memory `HashMap<url, Arc<Filing>>` — repeat reads never re-fetch.
+- **Caching (two-level):** L1 in-memory `HashMap<url, Arc<Filing>>` backed by an
+  L2 `SQLite` table (`filings`, in `idx.sqlite`) — repeat reads never re-fetch,
+  and extracted text survives a restart (an L2 hit is promoted back into L1).
 - One reused `wreq::Client`; the browser session is **lazily launched only if the
   fallback is hit** (most requests never start a browser).
 
@@ -81,12 +83,13 @@ export BINDGEN_EXTRA_CLANG_ARGS="-isystem /usr/lib/gcc/x86_64-linux-gnu/12/inclu
   path stays browser-free.
 - The Chrome **emulation profile** (`Chrome137`) may need bumping if Cloudflare
   tightens; that's exactly what the browser fallback covers.
-- Cache is in-memory → lost on restart (persistent SQLite cache deferred).
+- L2 cache is unbounded for now — no TTL/size eviction (filings are small text;
+  add pruning if the table grows large).
 
 ## Deferred
 
-- Persistent (SQLite) cache so restarts keep extracted text.
 - `ticker` + `announcement_no` → url lookup (so the agent needn't pass the url).
+- L2 cache eviction (TTL / max rows) if the `filings` table grows large.
 - OCR for scanned/image-only PDFs.
 - Pre-warm a hot subset (lapkeu / keterbukaan informasi material / dividen / RUPS).
 - Full-corpus extract → search/RAG (`filings_text`) if it becomes a product feature.

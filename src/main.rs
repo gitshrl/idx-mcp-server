@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
 
     // On-demand filing fetcher (Chrome-emulating HTTP client; egress path kept
     // separate from the locked, egress-free run_query engine).
-    let filings = Arc::new(Filings::new()?);
+    let filings = Arc::new(Filings::new(keys.clone())?);
 
     let factory_analytics = analytics.clone();
     let factory_filings = filings.clone();

@@ -10,8 +10,9 @@
 //!      page context — the resilient fallback if the emulation profile goes
 //!      stale against a tightened WAF.
 //!
-//! Extracted text is cached in memory so a repeat read never re-fetches. This is
-//! a deliberately SEPARATE path from `run_query`: that `DuckDB` serving
+//! Extracted text is cached two levels deep so a repeat read never re-fetches:
+//! an in-memory L1 (per process) backed by a `SQLite` L2 that survives a restart.
+//! This is a deliberately SEPARATE path from `run_query`: that `DuckDB` serving
 //! connection stays locked, read-only, and egress-free. Only this tool egresses,
 //! to one allowlisted host.
 
@@ -29,6 +30,8 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use wreq::Client;
 use wreq_util::Emulation;
+
+use crate::keys::{CachedFiling, KeyStore};
 
 /// Cap extracted text so a huge filing can't blow up a tool response.
 const MAX_TEXT_CHARS: usize = 200_000;
@@ -59,12 +62,14 @@ struct Session {
 }
 
 /// On-demand filing fetcher: a Chrome-emulating HTTP client (primary), a lazily
-/// launched headless browser (fallback), and an in-memory text cache.
+/// launched headless browser (fallback), an in-memory L1 cache, and a `SQLite`
+/// L2 cache (`store`) that survives a restart.
 pub struct Filings {
     client: Client,
     chrome: Option<String>,
     session: Mutex<Option<Session>>,
     cache: Mutex<HashMap<String, Arc<Filing>>>,
+    store: Arc<KeyStore>,
 }
 
 impl std::fmt::Debug for Filings {
@@ -74,11 +79,11 @@ impl std::fmt::Debug for Filings {
 }
 
 impl Filings {
-    /// Build the Chrome-emulating client.
+    /// Build the Chrome-emulating client over `store` (the persistent L2 cache).
     ///
     /// # Errors
     /// Fails if the TLS client cannot be constructed.
-    pub fn new() -> Result<Self> {
+    pub fn new(store: Arc<KeyStore>) -> Result<Self> {
         let client = Client::builder()
             .emulation(Emulation::Chrome137)
             .timeout(FETCH_TIMEOUT)
@@ -93,6 +98,7 @@ impl Filings {
             chrome,
             session: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
+            store,
         })
     }
 
@@ -105,8 +111,24 @@ impl Filings {
     /// PDF, or text extraction fails.
     pub async fn fetch(&self, url: &str) -> Result<Arc<Filing>> {
         validate_url(url)?;
+        // L1: in-memory (same Arc returned on a repeat within this process).
         if let Some(hit) = self.cache.lock().await.get(url).cloned() {
             return Ok(hit);
+        }
+        // L2: SQLite — survives a restart. Promote a hit back into L1.
+        if let Some(c) = self.cache_load(url).await? {
+            let filing = Arc::new(Filing {
+                url: c.url,
+                bytes: c.bytes,
+                chars: c.chars,
+                truncated: c.truncated,
+                text: c.text,
+            });
+            self.cache
+                .lock()
+                .await
+                .insert(url.to_string(), filing.clone());
+            return Ok(filing);
         }
         let body = match self.fetch_wreq(url).await {
             Ok(b) => b,
@@ -142,7 +164,35 @@ impl Filings {
             .lock()
             .await
             .insert(url.to_string(), filing.clone());
+        self.cache_store(&filing).await;
         Ok(filing)
+    }
+
+    /// Read the persistent (L2) cache off the async runtime — rusqlite blocks.
+    async fn cache_load(&self, url: &str) -> Result<Option<CachedFiling>> {
+        let store = self.store.clone();
+        let url = url.to_string();
+        tokio::task::spawn_blocking(move || store.filing_get(&url))
+            .await
+            .context("filing cache read task")?
+    }
+
+    /// Persist to the L2 cache; best-effort — a cache write must never fail the
+    /// fetch it backs.
+    async fn cache_store(&self, filing: &Filing) {
+        let store = self.store.clone();
+        let c = CachedFiling {
+            url: filing.url.clone(),
+            bytes: filing.bytes,
+            chars: filing.chars,
+            truncated: filing.truncated,
+            text: filing.text.clone(),
+        };
+        match tokio::task::spawn_blocking(move || store.filing_put(&c)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "filing cache write failed"),
+            Err(e) => tracing::warn!(error = %e, "filing cache write task panicked"),
+        }
     }
 
     /// Primary path: one HTTPS GET with a Chrome TLS/HTTP-2 fingerprint.
@@ -276,12 +326,36 @@ mod tests {
         assert!(validate_url("https://www.idx.co.id/StaticData/x.pdf").is_ok());
     }
 
+    /// A filing already in the L2 cache is served without any network egress,
+    /// then promoted into L1 (the second read returns the same `Arc`).
+    #[tokio::test]
+    async fn fetch_serves_from_l2_without_network() {
+        let store = Arc::new(KeyStore::open(":memory:").expect("open store"));
+        let url = "https://www.idx.co.id/seed.pdf";
+        store
+            .filing_put(&CachedFiling {
+                url: url.to_string(),
+                bytes: 10,
+                chars: 5,
+                truncated: false,
+                text: "seed!".to_string(),
+            })
+            .expect("seed l2");
+        let f = Filings::new(store).expect("build");
+        let got = f.fetch(url).await.expect("served from l2");
+        assert_eq!(got.text, "seed!");
+        assert_eq!(got.bytes, 10);
+        let again = f.fetch(url).await.expect("served from l1");
+        assert!(Arc::ptr_eq(&got, &again), "L2 hit must promote into L1");
+    }
+
     /// Live: primary (wreq) path. Needs network.
     #[tokio::test]
     #[ignore = "needs network; hits live idx.co.id past Cloudflare"]
     async fn live_fetch_wreq() {
         let url = std::env::var("IDX_TEST_PDF").unwrap_or_else(|_| SAMPLE.to_string());
-        let f = Filings::new().expect("build client");
+        let store = Arc::new(KeyStore::open(":memory:").expect("open store"));
+        let f = Filings::new(store).expect("build client");
         let body = f.fetch_wreq(&url).await.expect("wreq fetch");
         eprintln!("wreq bytes={}", body.len());
         assert!(body.starts_with(b"%PDF"), "not a pdf");
@@ -292,7 +366,8 @@ mod tests {
     #[ignore = "needs network + chrome; drives a headless browser"]
     async fn live_fetch_via_browser() {
         let url = std::env::var("IDX_TEST_PDF").unwrap_or_else(|_| SAMPLE.to_string());
-        let f = Filings::new().expect("build client");
+        let store = Arc::new(KeyStore::open(":memory:").expect("open store"));
+        let f = Filings::new(store).expect("build client");
         let body = f.fetch_via_browser(&url).await.expect("browser fetch");
         eprintln!("browser bytes={}", body.len());
         assert!(body.starts_with(b"%PDF"), "not a pdf");
@@ -303,7 +378,8 @@ mod tests {
     #[ignore = "needs network; hits live idx.co.id"]
     async fn live_fetch_and_extract() {
         let url = std::env::var("IDX_TEST_PDF").unwrap_or_else(|_| SAMPLE.to_string());
-        let f = Filings::new().expect("build client");
+        let store = Arc::new(KeyStore::open(":memory:").expect("open store"));
+        let f = Filings::new(store).expect("build client");
         let r = f.fetch(&url).await.expect("fetch filing");
         eprintln!("bytes={} chars={}", r.bytes, r.chars);
         assert!(r.bytes > 1000);

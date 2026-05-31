@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   scope      TEXT,
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS filings (
+  url        TEXT PRIMARY KEY,
+  bytes      INTEGER NOT NULL,
+  chars      INTEGER NOT NULL,
+  truncated  INTEGER NOT NULL,
+  text       TEXT NOT NULL,
+  fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ";
 
 /// A consumed authorization code's bound data, returned by `consume_auth_code`.
@@ -52,6 +60,16 @@ pub struct AuthCode {
     pub client_id: String,
     pub code_challenge: String,
     pub resource: Option<String>,
+}
+
+/// A persisted filing — the extracted text plus the metadata `get_filing`
+/// returns. Stored so a fetched PDF survives a restart (the L2 cache).
+pub struct CachedFiling {
+    pub url: String,
+    pub bytes: usize,
+    pub chars: usize,
+    pub truncated: bool,
+    pub text: String,
 }
 
 /// API-key + usage store backed by `SQLite`. Keys are stored only as SHA-256
@@ -249,6 +267,53 @@ impl KeyStore {
             .context("verify oauth token")?;
         Ok(hit.is_some())
     }
+
+    // ---- On-demand filing cache (survives restart; L2 behind the in-memory L1) ----
+
+    /// The cached filing for `url`, if it was fetched before.
+    pub fn filing_get(&self, url: &str) -> Result<Option<CachedFiling>> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let row = conn
+            .query_row(
+                "SELECT bytes, chars, truncated, text FROM filings WHERE url = ?1",
+                params![url],
+                |r| {
+                    Ok((
+                        usize::try_from(r.get::<_, i64>(0)?).unwrap_or(0),
+                        usize::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                        r.get::<_, i64>(2)? != 0,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("read cached filing")?;
+        Ok(row.map(|(bytes, chars, truncated, text)| CachedFiling {
+            url: url.to_string(),
+            bytes,
+            chars,
+            truncated,
+            text,
+        }))
+    }
+
+    /// Persist a fetched filing so it survives a restart (idempotent on `url`).
+    pub fn filing_put(&self, c: &CachedFiling) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.execute(
+            "INSERT OR REPLACE INTO filings (url, bytes, chars, truncated, text, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![
+                c.url,
+                i64::try_from(c.bytes).unwrap_or(i64::MAX),
+                i64::try_from(c.chars).unwrap_or(i64::MAX),
+                i64::from(c.truncated),
+                c.text
+            ],
+        )
+        .context("write cached filing")?;
+        Ok(())
+    }
 }
 
 /// A single tool-call usage record, queued to the background writer.
@@ -342,4 +407,31 @@ fn hash_key(key: &str) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filing_cache_roundtrip() {
+        let store = KeyStore::open(":memory:").expect("open store");
+        let url = "https://www.idx.co.id/x.pdf";
+        assert!(store.filing_get(url).expect("miss").is_none());
+        store
+            .filing_put(&CachedFiling {
+                url: url.to_string(),
+                bytes: 1234,
+                chars: 56,
+                truncated: true,
+                text: "hello".to_string(),
+            })
+            .expect("put");
+        let got = store.filing_get(url).expect("get").expect("present");
+        assert_eq!(got.url, url);
+        assert_eq!(got.bytes, 1234);
+        assert_eq!(got.chars, 56);
+        assert!(got.truncated);
+        assert_eq!(got.text, "hello");
+    }
 }
