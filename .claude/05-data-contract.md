@@ -8,15 +8,14 @@ The per-dataset sections below are keyed by **source collection** name; the **se
 
 | Served dataset | ← Source collection(s) |
 |---|---|
-| `prices` | yfdaily |
-| `eod_summary` | idxstocksummary |
+| `eod_summary` | idxstocksummary (THE price source) |
 | `indicators` | yfindicators |
 | `fundamentals` | keystats |
 | `summary` | yfsummary |
 | `analyst` | yfanalyst |
 | `companies` | stockprofiles (latest/ticker) |
 | `ownership` | kseiownership (investors[] exploded, ≥1%) |
-| `broker_activity` | grwbrokeractivity (exploded; marketdetectors enrichment optional) |
+| `broker_activity` | grwbrokeractivity (2025) + marketdetectors (2026) combined (exploded) |
 | `broker_distribution` | brokerdistribution |
 | `broker_rankings` | idxbrokersummary |
 | `announcements` | idxannouncement ∪ idxnewsannouncement |
@@ -48,8 +47,8 @@ The vendor collections (`keystats`, `stockprofiles`, `marketdetectors`, `tradebo
 
 ## Time-series datasets
 
-### `yfdaily` — daily OHLCV (primary price source) · tool: `get_prices`
-Grain: one row per `ticker` + `date`. Clean native numbers.
+### `yfdaily` — daily OHLCV (NOT served; collection retained, no served dataset)
+Grain: one row per `ticker` + `date`. Clean native numbers. The Yahoo `prices` dataset has been removed; `eod_summary` is now the sole price source. Kept here for lineage only.
 
 | column | type | source |
 |---|---|---|
@@ -59,8 +58,8 @@ Grain: one row per `ticker` + `date`. Clean native numbers.
 | volume | BIGINT | `volume` |
 | dividends, splits | DOUBLE | `dividends`/`splits` (0 = none) |
 
-### `idxstocksummary` — official EOD summary · tool: `get_prices` (`source=idx`)
-Grain: one row per `ticker` + `date`. Source keys `StockCode`/`Date` (PascalCase).
+### `idxstocksummary` — official EOD summary (THE price source) · tool: `get_prices`
+Grain: one row per `ticker` + `date`. Raw/unadjusted OHLC. Source keys `StockCode`/`Date` (PascalCase).
 
 | column | type | source |
 |---|---|---|
@@ -202,7 +201,7 @@ Grain: one row per `ticker` (latest). Columns: `ticker, date(updated_at), rec_st
 
 ## Tool → relation map (server)
 
-The server loads each served dataset into one read-only serving database and adds the views `latest` (per-ticker snapshot), `returns` (trailing/annualized returns), `broker_net` (per-broker net flow). Datasets without a typed shortcut (`indicators`, `analyst`, `broker_distribution`, `broker_rankings`) are reached through `run_query`.
+The server loads each served dataset into one read-only serving database and adds the views `latest` (per-ticker snapshot, over `eod_summary`), `returns` (trailing/annualized returns over `eod_summary`, on RAW/unadjusted close), `broker_net` (per-broker net flow). Datasets without a typed shortcut (`indicators`, `analyst`, `broker_distribution`, `broker_rankings`) are reached through `run_query`.
 
 | tool | relations | notes |
 |---|---|---|
@@ -211,10 +210,11 @@ The server loads each served dataset into one read-only serving database and add
 | `screen_stocks` | `latest` | typed cross-sectional filter/sort |
 | `search_tickers` | `companies` | match ticker/company_name |
 | `get_company` | `companies` + `fundamentals`(latest) + `summary` | flag yf ratio reliability |
-| `get_prices` | `prices` (default) / `eod_summary` (`source=idx`) | |
-| `get_broker_activity` | `broker_activity` | per-broker buy/sell rows |
+| `get_prices` | `eod_summary` | sole price source; no `source` param |
+| `get_broker_activity` | `broker_activity` | per-broker buy/sell rows (grw 2025 + marketdetectors 2026) |
 | `get_ownership` | `ownership` | ≥1% holders |
 | `get_announcements` | `announcements` | dedup locale twins |
+| `get_filing` | (none — on-demand fetch) | fetches an announcement PDF from idx.co.id past Cloudflare, extracts text; cached in memory |
 
 ## Validation before freezing (run a full-collection profile)
 

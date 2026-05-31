@@ -15,7 +15,7 @@ A Rust MCP server that exposes Indonesian market data as MCP tools, querying Par
                                           ▼  DuckDB (bundled) reads local dir OR r2:// (httpfs)
    MCP client ──HTTP──►  ┌──────────────────────────────────────────────┐
   Claude/Cursor/web      │  idx-mcp (axum Router)                        │
-                         │   public:  /.well-known/*  /oauth/*           │  ← (planned) no auth
+                         │   public:  /.well-known/*  /oauth/*           │  ← no auth (AS endpoints)
                          │   /mcp  .layer(auth: api_key OR oauth token)  │  ← tower, per-request
                          │          .nest_service StreamableHttpService  │  ← rmcp 1.7
                          │   tools → locked read-only serving DuckDB     │
@@ -27,13 +27,13 @@ DuckDB reads the local `./data` mirror in dev (`IDX_DATA_DIR`) and R2 directly i
 
 ## Datasets
 
-12 source-neutral datasets (see `README.md` for the table with row counts, and `05-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). Two datasets are ETL-combined (`broker_activity`, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%). At startup the server loads every dataset into one locked, read-only DuckDB **serving database** and builds three analytical views over the tables — `latest` (per-ticker snapshot for screening), `returns` (trailing + annualized returns via `ASOF JOIN`), `broker_net` (per-broker net flow). `SIGHUP` (or `idx-mcp refresh`, planned) rebuilds and atomically swaps it.
+11 source-neutral datasets (see `README.md` for the table with row counts, and `05-data-contract.md` for per-dataset columns). **Canonical keys**: every dataset exposes `ticker` (VARCHAR, UPPER) and, where time-series, `date` (DATE) — the ETL normalizes `stock_code`/`StockCode`/`Code`/`ticker` → `ticker`. Time-series partition daily by `date` (hive `date=YYYY-MM-DD/`); the server reads `<ds>/date=*/*.parquet` with `hive_partitioning=true` and filters uniformly on `ticker`/`date`. Snapshots are a single `<ds>/latest.parquet` (latest row per ticker). The official IDX EOD `eod_summary` (raw/unadjusted OHLC, volume, traded value, foreign buy/sell) is the price source. Two datasets are ETL-combined (`broker_activity` = `grwbrokeractivity` + `marketdetectors` for continuous bandarmology, `announcements`) and one is exploded+filtered (`ownership`, investors ≥1%). At startup the server loads every dataset into one locked, read-only DuckDB **serving database** and builds three analytical views over the tables — `latest` (per-ticker snapshot for screening, over `eod_summary`), `returns` (trailing + annualized returns via `ASOF JOIN` on `eod_summary`'s RAW unadjusted close), `broker_net` (per-broker net flow). `SIGHUP` (or `idx-mcp refresh`, planned) rebuilds and atomically swaps it.
 
 ## MCP tools
 
 Defined with `rmcp`'s `#[tool_router]`/`#[tool]` macros; each takes `Parameters<T>` (`serde::Deserialize` + `schemars::JsonSchema`, auto JSON-Schema). All in `src/server.rs`; every tool queries the loaded serving database via `src/analytics.rs` (`query_json` wraps each query in DuckDB `to_json(row)`).
 
-**Flexible core (3):** `run_query` (read-only SQL over the tables + the `latest`/`returns`/`broker_net` views — the tool for any derived/analytical question), `describe_schema` (live tables/columns + semantics), `screen_stocks` (typed cross-sectional filter/sort over `latest`). **Typed shortcuts (6, curated column projections):** `search_tickers`, `get_company` (profile+fundamentals+summary), `get_prices` (`source=yf|idx`), `get_broker_activity` (bandarmology), `get_ownership` (KSEI ≥1%), `get_announcements`.
+**Flexible core (3):** `run_query` (read-only SQL over the tables + the `latest`/`returns`/`broker_net` views — the tool for any derived/analytical question), `describe_schema` (live tables/columns + semantics), `screen_stocks` (typed cross-sectional filter/sort over `latest`). **Typed shortcuts (7, curated column projections):** `search_tickers`, `get_company` (profile+fundamentals+summary), `get_prices` (`eod_summary` IDX official EOD), `get_broker_activity` (bandarmology), `get_ownership` (KSEI ≥1%), `get_announcements`, `get_filing` (on-demand announcement-PDF fetch+extract, idx.co.id only — see `19-tool-get-filing.md`).
 
 `run_query` runs untrusted SQL → sandboxed (see §Query engine). `get_broker_activity` + `get_ownership` + broker-flow `run_query` are the IDX-specific moat (broker-attributed flow, KSEI local/foreign split — no US/global equivalent) → gate behind paid tier when monetizing.
 
@@ -45,11 +45,11 @@ Defined with `rmcp`'s `#[tool_router]`/`#[tool]` macros; each takes `Parameters<
 
 **Now (built, verified):** a tower middleware on `/mcp` reads `Authorization: Bearer <key>`, SHA-256-hashes it, looks it up in SQLite `api_keys`, 401 on miss, logs `usage`. Works for Claude Code, Cursor, and any HTTP/SDK client. Keys via `idx-mcp keys add`.
 
-**Next milestone — OAuth 2.1 (for Claude.ai web/Desktop).** Those clients won't send a static header; they run the MCP OAuth discovery dance. **rmcp 1.7's `auth` feature is client-side only** (it's an `oauth2`-crate client for connecting *to* servers); it provides zero server-side AS primitives — only `StreamableHttpService` and three reusable serde DTOs (`AuthorizationMetadata`, `ClientRegistrationResponse`, `OAuthClientConfig`). The in-repo `complex_auth_streamhttp.rs` example hand-builds the whole AS on axum — that's our reference.
+**OAuth 2.1 (for Claude.ai web/Desktop) — built, verified.** Those clients won't send a static header; they run the MCP OAuth discovery dance. **rmcp 1.7's `auth` feature is client-side only** (it's an `oauth2`-crate client for connecting *to* servers); it provides zero server-side AS primitives — only `StreamableHttpService` and three reusable serde DTOs (`AuthorizationMetadata`, `ClientRegistrationResponse`, `OAuthClientConfig`). The in-repo `complex_auth_streamhttp.rs` example hand-builds the whole AS on axum — that was our reference. The auth middleware now accepts a static API key **OR** an OAuth token.
 
 Decision: **self-host a minimal AS in-process** (don't delegate to an IdP, don't adopt `oxide-auth`/Hydra — they still leave us writing the metadata docs + DCR + validation, and add a dependency). **Opaque tokens** (random string, SHA-256 in SQLite — mirrors the `api_keys` pattern; revocation = one DELETE); no JWT/JWKS (single-instance).
 
-Endpoints to add (all **HTTPS**, behind a reverse proxy):
+Endpoints (built; all **HTTPS**, behind a reverse proxy):
 
 | Method · path | Purpose |
 |---|---|
@@ -61,8 +61,8 @@ Endpoints to add (all **HTTPS**, behind a reverse proxy):
 | (existing) `/mcp` | middleware now accepts api_key **OR** oauth token |
 
 **Hard MUSTs (from the spec research — easy to get wrong):**
-- **`WWW-Authenticate` on 401** at `/mcp` pointing at the RFC 9728 URL — the linchpin; without it Claude.ai can't discover the AS. (Current `src/auth.rs` returns a bare 401 — must change.)
-- **Route ordering**: `.well-known/*` and `/oauth/*` must be **outside** the auth layer (today the layer wraps the whole Router → would 401 the metadata). Wrap only the nested `/mcp`.
+- **`WWW-Authenticate` on 401** at `/mcp` pointing at the RFC 9728 URL — the linchpin; without it Claude.ai can't discover the AS. (`src/auth.rs` now emits it.)
+- **Route ordering**: `.well-known/*` and `/oauth/*` are **outside** the auth layer; only the nested `/mcp` is wrapped (otherwise the metadata would 401).
 - **Audience binding (RFC 8707)**: store `resource` on the token; reject at `/mcp` any token whose audience ≠ this server's canonical `/mcp` URL. No token pass-through.
 - **PKCE S256**: base64url **without** padding. **Codes**: single-use, ~30–60s, exact `redirect_uri` match (whitelist `https://claude.ai/api/mcp/auth_callback` exactly — verify current value).
 - **Canonical URL** (`IDX_PUBLIC_URL`): the RFC 9728 `resource`, the token audience, and Claude's `resource` param must be byte-identical.
@@ -77,7 +77,7 @@ CREATE TABLE oauth_codes  (code_hash TEXT PRIMARY KEY, client_id TEXT, account_i
 CREATE TABLE oauth_tokens (token_hash TEXT PRIMARY KEY, account_id INTEGER, client_id TEXT, audience TEXT, scope TEXT, expires_at TEXT);
 ```
 
-Implementation tasks (ordered): (1) move `.well-known`/`oauth` routes outside the auth layer, wrap only `/mcp`; (2) apply schema DDL (user) + backfill one account for existing keys; (3) `keys.rs`: `verify()`→account_id, add `verify_oauth()` + DCR/code/token helpers; (4) `IDX_PUBLIC_URL` in `config.rs`; (5) new `src/oauth.rs` (metadata + register + authorize + token); (6) `auth.rs`: try both, emit 401+`WWW-Authenticate`; (7) wire routes, add `base64`/`url` deps; (8) curl the full dance end-to-end. Defer: interactive login/consent (true multi-user), refresh rotation, JWT (only if multi-instance).
+Implementation (done, in this order): (1) moved `.well-known`/`oauth` routes outside the auth layer, wrapping only `/mcp`; (2) applied schema DDL (user) + backfilled one account for existing keys; (3) `keys.rs`: `verify()`→account_id, added `verify_oauth()` + DCR/code/token helpers; (4) `IDX_PUBLIC_URL` in `config.rs`; (5) `src/oauth.rs` (metadata + register + authorize + token); (6) `auth.rs`: tries both, emits 401+`WWW-Authenticate`; (7) wired routes, added `base64`/`url` deps; (8) curled the full dance end-to-end. The `/oauth/authorize` consent is an auto-consent MVP (open). Defer: interactive login/consent (true multi-user), refresh rotation, JWT (only if multi-instance).
 
 **Monetization (later):** `plan` → monthly quota enforced from `usage`; Stripe checkout + webhook flips `plan`; gate moat tools.
 
@@ -92,9 +92,9 @@ idx-mcp-server/
     analytics.rs # locked read-only serving DuckDB: loader, views, SQL validator, query exec, refresh
     catalog.rs   # static dataset/view catalog + run_query table allowlist + screen fields
     keys.rs      # SQLite api_keys/usage; key gen/hash, verify, log_usage
-    auth.rs      # Bearer tower middleware + usage logging  (+ oauth validation, planned)
-    server.rs    # IdxServer: #[tool_router] with the 9 tools + ServerHandler
-    oauth.rs     # (planned) AS: metadata + register + authorize + token
+    auth.rs      # Bearer tower middleware + usage logging  (+ oauth token validation, 401+WWW-Authenticate)
+    server.rs    # IdxServer: #[tool_router] with the 10 tools + ServerHandler
+    oauth.rs     # AS: metadata + register + authorize + token
     bin/etl.rs   # dev ETL: Mongo JSONL -> contract Parquet under ./data
     bin/q.rs     # ad-hoc DuckDB query tool for ./data
   data/          # local Parquet for dev (gitignored)
@@ -114,7 +114,7 @@ Single binary crate (one consumer ⇒ no workspace/`idx-core`). Extra binaries (
 
 ## Risks
 
-- **`yf*` redistribution licensing** (Yahoo-derived `prices`/`indicators`/`summary`/`analyst`) is restrictive — don't sell redistribution on these; lead paid with IDX/KSEI-owned data.
+- **`yf*` redistribution licensing** (Yahoo-derived `indicators`/`summary`/`analyst`) is restrictive — don't sell redistribution on these; lead paid with IDX/KSEI-owned data (`eod_summary` prices are IDX-official, not Yahoo).
 - **OAuth correctness** — the `WWW-Authenticate` header, route ordering, audience binding, PKCE base64 variant, and exact canonical-URL match are all silent-failure traps (§Auth).
 - **HTTPS required** for OAuth — server currently binds plaintext `127.0.0.1:8080`; needs a public TLS endpoint.
 - **DB migration is the user's job** — if the `accounts`/`oauth_*` tables aren't applied before deploy, auth breaks.

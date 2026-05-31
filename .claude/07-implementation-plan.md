@@ -10,7 +10,7 @@
 
 ## Status (2026-05-31)
 
-**Built + verified** — `clippy`/`fmt`/tests green and a 9/9 live MCP end-to-end run (`scripts/e2e.sh`): the serving engine (`analytics.rs`), the catalog + allowlist (`catalog.rs`), all 9 tools, the `latest`/`returns`/`broker_net` views, and SIGHUP refresh. **Deviation from the plan:** SQL validation uses DuckDB's own parser (`json_serialize_sql`) instead of `sqlparser` — zero dialect drift, no extra dependency. **Remaining:** `broker_distribution` currently loads as nested JSON (the edge-explode is external-ETL work, M5); the financials + filings tiers stay deferred as planned.
+**Built + verified** — `clippy`/`fmt`/tests green and a live MCP end-to-end run (`scripts/e2e.sh`): the serving engine (`analytics.rs`), the catalog + allowlist (`catalog.rs`), all 10 tools, the `latest`/`returns`/`broker_net` views, and SIGHUP refresh. **Beyond the original plan:** the OAuth 2.1 authorization server (DCR + PKCE + audience-bound tokens) is built, and `get_filing` fetches announcement PDFs past Cloudflare on demand (see `19-tool-get-filing.md`). **Deviation from the plan:** SQL validation uses DuckDB's own parser (`json_serialize_sql`) instead of `sqlparser` — zero dialect drift, no extra dependency. **Remaining:** `broker_distribution` currently loads as nested JSON (the edge-explode is external-ETL work, M5); the financials tier (keystats metrics) stays deferred as planned.
 
 ## Locked decisions (the grill outcomes)
 

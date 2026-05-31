@@ -8,10 +8,10 @@
 
 The flexible core of the server. Write a single read-only `SELECT` over the documented tables and the analytical views, and get rows back as JSON. Use it whenever a typed shortcut doesn't fit: cross-sectional screens, rankings, comparisons, returns, broker-flow/bandarmology, foreign-flow analysis. Call [describe_schema](describe-schema.md) first to see the exact tables, views, and columns.
 
-**Queryable relations.** The 12 base tables — `prices`, `eod_summary`, `indicators`, `fundamentals`, `broker_activity`, `broker_distribution`, `broker_rankings`, `announcements`, `companies`, `summary`, `analyst`, `ownership` — plus three pre-built views:
+**Queryable relations.** The 11 base tables — `eod_summary`, `indicators`, `fundamentals`, `broker_activity`, `broker_distribution`, `broker_rankings`, `announcements`, `companies`, `summary`, `analyst`, `ownership` — plus three pre-built views:
 
 * `latest` — one row per ticker: latest close/volume, fundamentals, Yahoo ratios, and key indicators joined. For screening.
-* `returns` — one row per ticker: trailing `ret_1w/1m/3m/6m/ytd/1y/3y` and annualized `cagr_3y` from close prices.
+* `returns` — one row per ticker: trailing `ret_1w/1m/3m/6m/ytd/1y/3y` and annualized `cagr_3y` from raw (unadjusted) `eod_summary` close.
 * `broker_net` — one row per ticker+date+broker_code: `buy_value`, `sell_value`, `net_value`, and the volume equivalents. Base for accumulation / flip / market-maker analysis.
 
 **Sandbox.** The query runs against a locked, read-only connection. Only a single `SELECT`/`WITH` is allowed; statements referencing any table outside the list above, file/network functions (`read_parquet`, `read_csv`, …), or any write/DDL/`ATTACH`/`COPY`/`PRAGMA` are rejected. Results are capped at 5000 rows (a `truncated` flag signals when the cap was hit), and queries are interrupted after 15 seconds.

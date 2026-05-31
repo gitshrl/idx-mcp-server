@@ -21,7 +21,7 @@
 - [screen_stocks](12-tool-screen-stocks.md): Cross-sectional screen (filter + sort) over the per-ticker latest snapshot.
 - [search_tickers](13-tool-search-tickers.md): Find IDX tickers by symbol or company name.
 - [get_company](14-tool-get-company.md): Company profile, key statistics, and market summary for a ticker.
-- [get_prices](15-tool-get-prices.md): Daily OHLCV price history — Yahoo-adjusted or IDX official (with foreign flow).
+- [get_prices](15-tool-get-prices.md): Daily official IDX end-of-day prices (raw close), with volume, traded value, and foreign buy/sell flow.
 - [get_broker_activity](16-tool-get-broker-activity.md): Per-broker buy/sell flow (bandarmology) for a ticker over a date range.
 - [get_ownership](17-tool-get-ownership.md): KSEI depository holders ≥1%, with local/foreign split.
 - [get_announcements](18-tool-get-announcements.md): IDX corporate announcements and news.
