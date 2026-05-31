@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     fs::create_dir_all(&tmp).ok();
     conn.execute_batch(&format!(
         "SET threads TO 4; SET preserve_insertion_order=false; SET temp_directory='{}'; SET partitioned_write_max_open_files TO 2000;",
-        tmp.display()
+        tmp.display().to_string().replace('\'', "''")
     ))?;
 
     let mut ok = 0usize;

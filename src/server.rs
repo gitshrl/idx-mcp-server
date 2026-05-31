@@ -205,9 +205,15 @@ impl IdxServer {
             .await?;
         let summary = self
             .first(
-                "SELECT ticker, name, market_cap, trailing_pe, forward_pe, price_to_book, \
-                 dividend_yield, beta, return_on_equity, profit_margins, week_high_52, \
-                 week_low_52, target_mean_price, recommendation_key \
+                "SELECT ticker, name, market_cap, \
+                 CASE WHEN isfinite(TRY_CAST(trailing_pe AS DOUBLE)) THEN TRY_CAST(trailing_pe AS DOUBLE) END AS trailing_pe, \
+                 CASE WHEN isfinite(TRY_CAST(forward_pe AS DOUBLE)) THEN TRY_CAST(forward_pe AS DOUBLE) END AS forward_pe, \
+                 CASE WHEN isfinite(TRY_CAST(price_to_book AS DOUBLE)) THEN TRY_CAST(price_to_book AS DOUBLE) END AS price_to_book, \
+                 CASE WHEN isfinite(TRY_CAST(dividend_yield AS DOUBLE)) THEN TRY_CAST(dividend_yield AS DOUBLE) END AS dividend_yield, \
+                 CASE WHEN isfinite(TRY_CAST(beta AS DOUBLE)) THEN TRY_CAST(beta AS DOUBLE) END AS beta, \
+                 CASE WHEN isfinite(TRY_CAST(return_on_equity AS DOUBLE)) THEN TRY_CAST(return_on_equity AS DOUBLE) END AS return_on_equity, \
+                 CASE WHEN isfinite(TRY_CAST(profit_margins AS DOUBLE)) THEN TRY_CAST(profit_margins AS DOUBLE) END AS profit_margins, \
+                 week_high_52, week_low_52, target_mean_price, recommendation_key \
                  FROM summary WHERE ticker = ? LIMIT 1",
                 &req.ticker,
             )

@@ -28,6 +28,7 @@ use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::sync::Mutex;
+use url::{Host, Url};
 use wreq::Client;
 use wreq_util::Emulation;
 
@@ -301,15 +302,23 @@ async fn browser_fetch(page: &Page, url: &str) -> Result<Vec<u8>> {
 }
 
 /// Only allow `idx.co.id` hosts over https (no open SSRF via the tool).
+///
+/// Parsed with the same WHATWG `url` crate that `wreq` uses for the request, so
+/// the validator and the client can't disagree on the host (a hand-rolled parse
+/// is bypassable, e.g. `https://evil.com\.idx.co.id/` reads as host `evil.com`).
+/// Credentials and IP-literal hosts are rejected outright.
 fn validate_url(url: &str) -> Result<()> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| anyhow!("url must be https"))?;
-    let host = rest.split('/').next().unwrap_or_default();
-    if host == "idx.co.id" || host.ends_with(".idx.co.id") {
-        Ok(())
-    } else {
-        bail!("url host not allowed (must be idx.co.id): {host}")
+    let parsed = Url::parse(url).context("invalid url")?;
+    if parsed.scheme() != "https" {
+        bail!("url must be https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("url must not carry credentials");
+    }
+    match parsed.host() {
+        Some(Host::Domain(h)) if h == "idx.co.id" || h.ends_with(".idx.co.id") => Ok(()),
+        Some(Host::Domain(h)) => bail!("url host not allowed (must be idx.co.id): {h}"),
+        _ => bail!("url host not allowed (must be an idx.co.id domain)"),
     }
 }
 
@@ -324,6 +333,13 @@ mod tests {
         assert!(validate_url("https://evil.com/x.pdf").is_err());
         assert!(validate_url("http://www.idx.co.id/x.pdf").is_err()); // not https
         assert!(validate_url("https://www.idx.co.id/StaticData/x.pdf").is_ok());
+        // host-confusion bypasses the WHATWG parser must close:
+        assert!(validate_url("https://evil.com\\.idx.co.id/x.pdf").is_err()); // backslash → host=evil.com
+        assert!(validate_url("https://idx.co.id@evil.com/x.pdf").is_err()); // userinfo → host=evil.com
+        assert!(validate_url("https://www.idx.co.id@evil.com/x.pdf").is_err());
+        assert!(validate_url("https://idx.co.id.evil.com/x.pdf").is_err()); // suffix, not subdomain
+        assert!(validate_url("https://169.254.169.254/x.pdf").is_err()); // ip literal
+        assert!(validate_url("https://IDX.CO.ID/x.pdf").is_ok()); // case-insensitive host
     }
 
     /// A filing already in the L2 cache is served without any network egress,

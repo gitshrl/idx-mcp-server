@@ -1729,6 +1729,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wreq",
  "wreq-util",
 ]

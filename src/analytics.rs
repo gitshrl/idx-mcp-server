@@ -379,11 +379,12 @@ fn build_and_open(source: &Source, dir: &Path, version: u64) -> Result<Serving> 
 fn build_serving(source: &Source, dst: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let conn =
         Connection::open(dst).with_context(|| format!("open serving db {}", dst.display()))?;
-    // Spill into the serving dir (cleaned per-instance), never the cwd.
+    // Spill into the serving dir (cleaned per-instance), never the cwd. Escape
+    // the path into the PRAGMA string literal (a quote in TMPDIR would break it).
     let tmp = dst.parent().unwrap_or_else(|| Path::new("."));
     conn.execute_batch(&format!(
         "SET threads TO 4; SET temp_directory = '{}';",
-        tmp.display()
+        tmp.display().to_string().replace('\'', "''")
     ))
     .context("set loader pragmas")?;
     if let Some(sql) = &source.secret_sql {
@@ -463,13 +464,13 @@ SELECT
   c.ticker, c.company_name, c.sector, c.sub_sector,
   p.close, p.volume, p.price_date,
   f.market_cap, f.enterprise_value, f.shares_outstanding, f.free_float_pct,
-  TRY_CAST(s.trailing_pe AS DOUBLE) AS trailing_pe,
-  TRY_CAST(s.forward_pe AS DOUBLE) AS forward_pe,
-  TRY_CAST(s.price_to_book AS DOUBLE) AS price_to_book,
-  TRY_CAST(s.dividend_yield AS DOUBLE) AS dividend_yield,
-  TRY_CAST(s.beta AS DOUBLE) AS beta,
-  TRY_CAST(s.return_on_equity AS DOUBLE) AS return_on_equity,
-  TRY_CAST(s.profit_margins AS DOUBLE) AS profit_margins,
+  CASE WHEN isfinite(TRY_CAST(s.trailing_pe AS DOUBLE)) THEN TRY_CAST(s.trailing_pe AS DOUBLE) END AS trailing_pe,
+  CASE WHEN isfinite(TRY_CAST(s.forward_pe AS DOUBLE)) THEN TRY_CAST(s.forward_pe AS DOUBLE) END AS forward_pe,
+  CASE WHEN isfinite(TRY_CAST(s.price_to_book AS DOUBLE)) THEN TRY_CAST(s.price_to_book AS DOUBLE) END AS price_to_book,
+  CASE WHEN isfinite(TRY_CAST(s.dividend_yield AS DOUBLE)) THEN TRY_CAST(s.dividend_yield AS DOUBLE) END AS dividend_yield,
+  CASE WHEN isfinite(TRY_CAST(s.beta AS DOUBLE)) THEN TRY_CAST(s.beta AS DOUBLE) END AS beta,
+  CASE WHEN isfinite(TRY_CAST(s.return_on_equity AS DOUBLE)) THEN TRY_CAST(s.return_on_equity AS DOUBLE) END AS return_on_equity,
+  CASE WHEN isfinite(TRY_CAST(s.profit_margins AS DOUBLE)) THEN TRY_CAST(s.profit_margins AS DOUBLE) END AS profit_margins,
   i.rsi_14, i.sma_50, i.sma_200
 FROM companies c
 LEFT JOIN p ON p.ticker = c.ticker

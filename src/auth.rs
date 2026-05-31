@@ -45,8 +45,13 @@ pub async fn auth_middleware(
     let Some(token) = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .map(str::to_owned)
+        .and_then(|h| {
+            // RFC 7235: the auth scheme is case-insensitive ("Bearer" / "bearer").
+            let (scheme, tok) = h.split_once(' ')?;
+            scheme
+                .eq_ignore_ascii_case("bearer")
+                .then(|| tok.trim().to_owned())
+        })
     else {
         return unauthorized(&state.public_url);
     };
