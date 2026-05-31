@@ -37,13 +37,15 @@ fn main() -> anyhow::Result<()> {
     fs::create_dir_all("data")?;
 
     let conn = Connection::open_in_memory()?;
-    // Many daily partitions per dataset; let DuckDB keep enough files open.
-    // `preserve_insertion_order=false` lets partitioned COPY stream instead of
-    // buffering the whole result, so a big dataset (e.g. exploded broker_activity)
-    // doesn't blow up memory or thrash.
-    conn.execute_batch(
-        "SET threads TO 4; SET preserve_insertion_order=false; SET partitioned_write_max_open_files TO 2000;",
-    )?;
+    // Spill into a temp dir, not the cwd `.tmp`. `preserve_insertion_order=false`
+    // lets partitioned COPY stream instead of buffering the whole result, so a big
+    // dataset (e.g. exploded broker_activity) doesn't blow up memory or thrash.
+    let tmp = std::env::temp_dir().join("idx-etl-duck");
+    fs::create_dir_all(&tmp).ok();
+    conn.execute_batch(&format!(
+        "SET threads TO 4; SET preserve_insertion_order=false; SET temp_directory='{}'; SET partitioned_write_max_open_files TO 2000;",
+        tmp.display()
+    ))?;
 
     let mut ok = 0usize;
     for s in &stmts {

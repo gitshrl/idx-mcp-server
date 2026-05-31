@@ -379,8 +379,13 @@ fn build_and_open(source: &Source, dir: &Path, version: u64) -> Result<Serving> 
 fn build_serving(source: &Source, dst: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let conn =
         Connection::open(dst).with_context(|| format!("open serving db {}", dst.display()))?;
-    conn.execute_batch("SET threads TO 4;")
-        .context("set loader threads")?;
+    // Spill into the serving dir (cleaned per-instance), never the cwd.
+    let tmp = dst.parent().unwrap_or_else(|| Path::new("."));
+    conn.execute_batch(&format!(
+        "SET threads TO 4; SET temp_directory = '{}';",
+        tmp.display()
+    ))
+    .context("set loader pragmas")?;
     if let Some(sql) = &source.secret_sql {
         conn.execute_batch(sql).context("create r2 secret")?;
     }
@@ -458,8 +463,13 @@ SELECT
   c.ticker, c.company_name, c.sector, c.sub_sector,
   p.close, p.volume, p.price_date,
   f.market_cap, f.enterprise_value, f.shares_outstanding, f.free_float_pct,
-  s.trailing_pe, s.forward_pe, s.price_to_book, s.dividend_yield, s.beta,
-  s.return_on_equity, s.profit_margins,
+  TRY_CAST(s.trailing_pe AS DOUBLE) AS trailing_pe,
+  TRY_CAST(s.forward_pe AS DOUBLE) AS forward_pe,
+  TRY_CAST(s.price_to_book AS DOUBLE) AS price_to_book,
+  TRY_CAST(s.dividend_yield AS DOUBLE) AS dividend_yield,
+  TRY_CAST(s.beta AS DOUBLE) AS beta,
+  TRY_CAST(s.return_on_equity AS DOUBLE) AS return_on_equity,
+  TRY_CAST(s.profit_margins AS DOUBLE) AS profit_margins,
   i.rsi_14, i.sma_50, i.sma_200
 FROM companies c
 LEFT JOIN p ON p.ticker = c.ticker
