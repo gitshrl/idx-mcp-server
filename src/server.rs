@@ -49,16 +49,6 @@ pub struct TickerReq {
     pub ticker: String,
 }
 
-/// Price data source for `get_prices`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum PriceSource {
-    /// Yahoo-adjusted OHLCV (default).
-    Yf,
-    /// Official IDX end-of-day summary, with foreign flow.
-    Idx,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PricesReq {
     /// IDX ticker symbol, e.g. "BBCA".
@@ -67,8 +57,6 @@ pub struct PricesReq {
     pub from: Option<String>,
     /// Inclusive end date, YYYY-MM-DD.
     pub to: Option<String>,
-    /// Price source: `yf` (Yahoo OHLCV, default) or `idx` (official summary + foreign flow).
-    pub source: Option<PriceSource>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -203,24 +191,15 @@ impl IdxServer {
     }
 
     #[tool(
-        description = "Daily OHLCV price history for an IDX ticker. source: 'yf' (default) or 'idx' (official, with foreign flow)."
+        description = "Daily official IDX end-of-day prices for a ticker: OHLC, volume, traded value, and foreign buy/sell flow. Raw (unadjusted) close."
     )]
     async fn get_prices(
         &self,
         Parameters(req): Parameters<PricesReq>,
     ) -> Result<CallToolResult, McpError> {
-        let (cols, table) = match req.source {
-            Some(PriceSource::Idx) => (
-                "ticker, date, open, high, low, close, previous, change, volume, value, \
-                 frequency, foreign_buy, foreign_sell",
-                "eod_summary",
-            ),
-            _ => (
-                "ticker, date, open, high, low, close, volume, dividends, splits",
-                "prices",
-            ),
-        };
-        let mut sql = format!("SELECT {cols} FROM {table} WHERE ticker = ?");
+        let mut sql = "SELECT ticker, date, open, high, low, close, previous, change, volume, \
+             value, frequency, foreign_buy, foreign_sell FROM eod_summary WHERE ticker = ?"
+            .to_string();
         push_date_range(&mut sql, req.from.as_ref(), req.to.as_ref())?;
         let _ = write!(sql, " ORDER BY date LIMIT {MAX_ROWS}");
         let rows = self

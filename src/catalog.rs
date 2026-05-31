@@ -36,14 +36,9 @@ pub struct View {
 /// The 12 base tables. Keyed by `ticker` (+ `date` for time series).
 pub const DATASETS: &[Dataset] = &[
     Dataset {
-        name: "prices",
-        kind: Kind::TimeSeries,
-        doc: "Daily OHLCV (Yahoo-adjusted). Grain: ticker+date. Primary price source.",
-    },
-    Dataset {
         name: "eod_summary",
         kind: Kind::TimeSeries,
-        doc: "Official IDX end-of-day summary incl. foreign_buy/foreign_sell and traded value. Grain: ticker+date.",
+        doc: "Daily official IDX end-of-day prices (raw, unadjusted): OHLC, volume, traded value, plus foreign_buy/foreign_sell flow. The price source for get_prices and the latest/returns views. Grain: ticker+date.",
     },
     Dataset {
         name: "indicators",
@@ -103,7 +98,7 @@ pub const VIEWS: &[View] = &[
         name: "latest",
         requires: &[
             "companies",
-            "prices",
+            "eod_summary",
             "indicators",
             "fundamentals",
             "summary",
@@ -112,8 +107,8 @@ pub const VIEWS: &[View] = &[
     },
     View {
         name: "returns",
-        requires: &["prices"],
-        doc: "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_3y from close prices.",
+        requires: &["eod_summary"],
+        doc: "One row per ticker: trailing % returns (ret_1w/1m/3m/6m/ytd/1y/3y) and annualized cagr_3y from raw IDX close (unadjusted for splits/dividends).",
     },
     View {
         name: "broker_net",

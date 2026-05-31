@@ -14,6 +14,7 @@ pedantic = "warn"
 [dependencies]
 anyhow = "1.0.102"
 axum = "0.8"
+base64 = "0.22"
 duckdb = { version = "1.10503.1", features = ["bundled", "json", "parquet"] }
 rand = "0.10.1"
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }

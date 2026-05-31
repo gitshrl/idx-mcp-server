@@ -1,5 +1,6 @@
 /target
 /data
+/.tmp
 *.sqlite
 *.sqlite-journal
 .env

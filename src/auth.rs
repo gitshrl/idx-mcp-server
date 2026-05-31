@@ -4,9 +4,9 @@ use std::time::Instant;
 use axum::{
     body::{Body, to_bytes},
     extract::State,
-    http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
+    http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION, header::WWW_AUTHENTICATE},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::keys::KeyStore;
@@ -18,48 +18,71 @@ const MAX_BODY: usize = 1 << 20; // 1 MiB
 #[derive(Clone)]
 pub struct AuthState {
     pub keys: Arc<KeyStore>,
+    /// Canonical base URL, for the `WWW-Authenticate` discovery hint + audience.
+    pub public_url: String,
 }
 
-/// Bearer-API-key gate, applied as the outermost layer so it runs on every
-/// request (including the MCP `initialize` handshake) before the MCP handler.
-/// `SQLite` work (key verify, usage logging) runs on a blocking thread, and the
-/// usage write is fired off the response path so it never adds request latency.
+/// Who authenticated. API-key requests carry a key id for usage logging; OAuth
+/// tokens don't map to an `api_keys` row, so they skip usage logging for now.
+#[derive(Clone, Copy)]
+enum Principal {
+    ApiKey(i64),
+    OAuth,
+}
+
+/// Bearer gate on `/mcp`, applied as the outermost layer so it runs on every
+/// request (including the MCP `initialize` handshake). Accepts a static API key
+/// **or** an OAuth access token (audience-bound). `SQLite` work runs on a
+/// blocking thread; usage logging is fired off the response path.
 pub async fn auth_middleware(
     State(state): State<AuthState>,
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
-    let Some(key) = headers
+) -> Response {
+    let Some(token) = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .map(str::to_owned)
     else {
-        return Err(StatusCode::UNAUTHORIZED);
+        return unauthorized(&state.public_url);
     };
 
-    // Verify off the async runtime — rusqlite is blocking.
+    // Verify off the async runtime — rusqlite is blocking. Try the API key
+    // first, then the OAuth token; first hit wins.
     let keys = state.keys.clone();
-    let key_id = match tokio::task::spawn_blocking(move || keys.verify(&key)).await {
-        Ok(Ok(Some(id))) => id,
-        Ok(Ok(None)) => return Err(StatusCode::UNAUTHORIZED),
+    let audience = format!("{}/mcp", state.public_url);
+    let principal = tokio::task::spawn_blocking(move || match keys.verify(&token) {
+        Ok(Some(id)) => Ok(Some(Principal::ApiKey(id))),
+        Ok(None) => match keys.verify_oauth(&token, &audience) {
+            Ok(true) => Ok(Some(Principal::OAuth)),
+            Ok(false) => Ok(None),
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    })
+    .await;
+
+    let principal = match principal {
+        Ok(Ok(Some(p))) => p,
+        Ok(Ok(None)) => return unauthorized(&state.public_url),
         Ok(Err(e)) => {
-            tracing::error!(error = %e, "api key verification failed");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            tracing::error!(error = %e, "credential verification failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         Err(e) => {
             tracing::error!(error = %e, "verify task panicked");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
     // Buffer the body to read the JSON-RPC method / tool name for usage
     // logging, then rebuild the request unchanged for the MCP handler.
     let (parts, body) = request.into_parts();
-    let bytes = to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    let Ok(bytes) = to_bytes(body, MAX_BODY).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
     let tool = tool_label(&bytes);
     let request = Request::from_parts(parts, Body::from(bytes));
 
@@ -68,18 +91,33 @@ pub async fn auth_middleware(
     let latency_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Log usage off the request path so the SQLite write never delays the reply.
-    let keys = state.keys.clone();
-    tokio::spawn(async move {
-        match tokio::task::spawn_blocking(move || keys.log_usage(key_id, &tool, latency_ms, 0))
-            .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "usage logging failed"),
-            Err(e) => tracing::warn!(error = %e, "usage logging task panicked"),
-        }
-    });
+    // Only API-key requests have a key id; OAuth requests skip logging for now.
+    if let Principal::ApiKey(key_id) = principal {
+        let keys = state.keys.clone();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || keys.log_usage(key_id, &tool, latency_ms, 0))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "usage logging failed"),
+                Err(e) => tracing::warn!(error = %e, "usage logging task panicked"),
+            }
+        });
+    }
 
-    Ok(response)
+    response
+}
+
+/// 401 carrying the RFC 9728 discovery hint so MCP clients can find the AS.
+/// Without this header Claude.ai cannot begin the OAuth dance.
+fn unauthorized(public_url: &str) -> Response {
+    let challenge =
+        format!("Bearer resource_metadata=\"{public_url}/.well-known/oauth-protected-resource\"");
+    let mut resp = StatusCode::UNAUTHORIZED.into_response();
+    if let Ok(value) = challenge.parse() {
+        resp.headers_mut().insert(WWW_AUTHENTICATE, value);
+    }
+    resp
 }
 
 /// The tool name for a `tools/call`, else the JSON-RPC method, else `mcp` for

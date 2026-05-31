@@ -444,7 +444,7 @@ const LATEST_VIEW: &str = "\
 CREATE TABLE latest AS
 WITH p AS (
   SELECT ticker, close, volume, date AS price_date
-  FROM prices QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
+  FROM eod_summary QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
 ),
 i AS (
   SELECT ticker, rsi_14, sma_50, sma_200
@@ -472,7 +472,7 @@ const RETURNS_VIEW: &str = "\
 CREATE TABLE returns AS
 WITH lc AS (
   SELECT ticker, close, date AS as_of
-  FROM prices QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
+  FROM eod_summary QUALIFY row_number() OVER (PARTITION BY ticker ORDER BY date DESC) = 1
 )
 SELECT lc.ticker, lc.as_of, lc.close,
   100.0 * (lc.close / NULLIF(w1w.close, 0) - 1) AS ret_1w,
@@ -484,13 +484,13 @@ SELECT lc.ticker, lc.as_of, lc.close,
   100.0 * (lc.close / NULLIF(w3y.close, 0) - 1) AS ret_3y,
   100.0 * (power(lc.close / NULLIF(w3y.close, 0), 1.0 / 3.0) - 1) AS cagr_3y
 FROM lc
-ASOF LEFT JOIN prices w1w ON w1w.ticker = lc.ticker AND w1w.date <= lc.as_of - INTERVAL '7 days'
-ASOF LEFT JOIN prices w1m ON w1m.ticker = lc.ticker AND w1m.date <= lc.as_of - INTERVAL '1 month'
-ASOF LEFT JOIN prices w3m ON w3m.ticker = lc.ticker AND w3m.date <= lc.as_of - INTERVAL '3 months'
-ASOF LEFT JOIN prices w6m ON w6m.ticker = lc.ticker AND w6m.date <= lc.as_of - INTERVAL '6 months'
-ASOF LEFT JOIN prices wyt ON wyt.ticker = lc.ticker AND wyt.date <  date_trunc('year', lc.as_of)
-ASOF LEFT JOIN prices w1y ON w1y.ticker = lc.ticker AND w1y.date <= lc.as_of - INTERVAL '1 year'
-ASOF LEFT JOIN prices w3y ON w3y.ticker = lc.ticker AND w3y.date <= lc.as_of - INTERVAL '3 years'
+ASOF LEFT JOIN eod_summary w1w ON w1w.ticker = lc.ticker AND w1w.date <= lc.as_of - INTERVAL '7 days'
+ASOF LEFT JOIN eod_summary w1m ON w1m.ticker = lc.ticker AND w1m.date <= lc.as_of - INTERVAL '1 month'
+ASOF LEFT JOIN eod_summary w3m ON w3m.ticker = lc.ticker AND w3m.date <= lc.as_of - INTERVAL '3 months'
+ASOF LEFT JOIN eod_summary w6m ON w6m.ticker = lc.ticker AND w6m.date <= lc.as_of - INTERVAL '6 months'
+ASOF LEFT JOIN eod_summary wyt ON wyt.ticker = lc.ticker AND wyt.date <  date_trunc('year', lc.as_of)
+ASOF LEFT JOIN eod_summary w1y ON w1y.ticker = lc.ticker AND w1y.date <= lc.as_of - INTERVAL '1 year'
+ASOF LEFT JOIN eod_summary w3y ON w3y.ticker = lc.ticker AND w3y.date <= lc.as_of - INTERVAL '3 years'
 ORDER BY lc.ticker;";
 
 const BROKER_NET_VIEW: &str = "\
@@ -795,6 +795,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".to_string(),
             sqlite_path: ":memory:".to_string(),
             data_base: DataBase::Local("data".to_string()),
+            public_url: "http://127.0.0.1:0".to_string(),
         }
     }
 
@@ -808,9 +809,9 @@ mod tests {
     fn validate_accepts_allowed_selects() {
         let c = parser_conn();
         for sql in [
-            "SELECT ticker, close FROM prices LIMIT 5",
+            "SELECT ticker, close FROM eod_summary LIMIT 5",
             "SELECT * FROM latest WHERE market_cap > 1e12",
-            "WITH x AS (SELECT ticker FROM prices) SELECT * FROM x JOIN companies USING(ticker)",
+            "WITH x AS (SELECT ticker FROM eod_summary) SELECT * FROM x JOIN companies USING(ticker)",
             "SELECT ticker, ret_1y FROM returns ORDER BY ret_1y DESC",
             "SELECT * FROM generate_series(1, 5)",
         ] {
@@ -824,11 +825,11 @@ mod tests {
         for sql in [
             "SELECT * FROM read_parquet('x.parquet')",
             "SELECT * FROM read_csv('x.csv')",
-            "DROP TABLE prices",
-            "INSERT INTO prices VALUES (1)",
-            "UPDATE prices SET close = 0",
+            "DROP TABLE eod_summary",
+            "INSERT INTO eod_summary VALUES (1)",
+            "UPDATE eod_summary SET close = 0",
             "ATTACH 'x.db' AS y",
-            "COPY prices TO 'x.csv'",
+            "COPY eod_summary TO 'x.csv'",
             "PRAGMA database_list",
             "SELECT 1; SELECT 2",
             "SELECT * FROM duckdb_settings()",
@@ -845,7 +846,7 @@ mod tests {
     /// so CI without data stays green.
     #[tokio::test]
     async fn engine_on_real_data() {
-        if !Path::new("data/prices").exists() {
+        if !Path::new("data/eod_summary").exists() {
             eprintln!("skip: ./data not present");
             return;
         }
@@ -864,7 +865,7 @@ mod tests {
         // valid query returns exactly the requested rows
         let out = a
             .run_query(
-                "SELECT ticker, close FROM prices ORDER BY date DESC LIMIT 3",
+                "SELECT ticker, close FROM eod_summary ORDER BY date DESC LIMIT 3",
                 None,
             )
             .await
@@ -893,13 +894,13 @@ mod tests {
 
         // every dangerous shape is rejected
         for sql in [
-            "SELECT * FROM read_parquet('data/prices/latest.parquet')",
-            "DROP TABLE prices",
-            "INSERT INTO prices VALUES (1)",
+            "SELECT * FROM read_parquet('data/eod_summary/latest.parquet')",
+            "DROP TABLE eod_summary",
+            "INSERT INTO eod_summary VALUES (1)",
             "SELECT 1; SELECT 2",
             "SELECT * FROM duckdb_settings()",
             "ATTACH 'x.db' AS y",
-            "COPY prices TO 'x.csv'",
+            "COPY eod_summary TO 'x.csv'",
             "PRAGMA database_list",
         ] {
             assert!(
@@ -910,7 +911,7 @@ mod tests {
 
         // the row cap truncates and flags it
         let capped = a
-            .run_query("SELECT ticker FROM prices", Some(5))
+            .run_query("SELECT ticker FROM eod_summary", Some(5))
             .await
             .expect("capped");
         assert_eq!(capped.rows.len(), 5);
@@ -919,12 +920,12 @@ mod tests {
         // describe lists tables and views
         let d = a.describe(None).await.expect("describe");
         let arr = d.as_array().expect("array");
-        assert!(arr.iter().any(|r| r["name"] == "prices"));
+        assert!(arr.iter().any(|r| r["name"] == "eod_summary"));
         assert!(arr.iter().any(|r| r["name"] == "returns"));
 
         // the connection pool serves concurrent queries without deadlock
         let (r1, r2, r3, r4) = tokio::join!(
-            a.run_query("SELECT count(*) FROM prices", None),
+            a.run_query("SELECT count(*) FROM eod_summary", None),
             a.run_query("SELECT count(*) FROM companies", None),
             a.run_query("SELECT count(*) FROM eod_summary", None),
             a.run_query("SELECT count(*) FROM broker_rankings", None),

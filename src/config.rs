@@ -37,6 +37,11 @@ pub struct Config {
     pub bind_addr: String,
     pub sqlite_path: String,
     pub data_base: DataBase,
+    /// Canonical externally-visible base URL (no trailing slash) used as the
+    /// OAuth issuer, the RFC 9728 `resource`, and the token audience. Must be
+    /// byte-identical to what the client uses. Defaults to `http://<bind_addr>`
+    /// for local dev; set `IDX_PUBLIC_URL` to the public HTTPS origin in prod.
+    pub public_url: String,
 }
 
 impl Config {
@@ -49,6 +54,10 @@ impl Config {
     pub fn from_env() -> Self {
         let bind_addr = env::var("IDX_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
         let sqlite_path = env::var("IDX_SQLITE").unwrap_or_else(|_| "./idx.sqlite".to_string());
+        let public_url = env::var("IDX_PUBLIC_URL")
+            .unwrap_or_else(|_| format!("http://{bind_addr}"))
+            .trim_end_matches('/')
+            .to_string();
 
         let data_base = if let Ok(dir) = env::var("IDX_DATA_DIR") {
             DataBase::Local(dir)
@@ -72,6 +81,7 @@ impl Config {
             bind_addr,
             sqlite_path,
             data_base,
+            public_url,
         }
     }
 }
