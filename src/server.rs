@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::analytics::Analytics;
 use crate::catalog;
+use crate::filings::Filings;
 
 // Every served relation exposes `ticker` (UPPERCASE) and, for time series,
 // `date` (DATE). Tools query the loaded serving database, never Parquet files.
@@ -22,6 +23,8 @@ const MAX_ROWS: u32 = catalog::MAX_ROWS;
 #[derive(Clone)]
 pub struct IdxServer {
     analytics: Arc<Analytics>,
+    /// On-demand announcement-PDF fetcher (egress path, separate from the sandbox).
+    filings: Arc<Filings>,
     // Read by the rmcp `#[tool_handler]` macro; dead-code analysis misses that.
     #[allow(dead_code)]
     tool_router: ToolRouter<IdxServer>,
@@ -34,6 +37,12 @@ impl std::fmt::Debug for IdxServer {
 }
 
 // ---- tool request types (schemas auto-derived from these) ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FilingReq {
+    /// Announcement PDF url (the `FullSavePath` from `get_announcements`). Must be on idx.co.id.
+    pub url: String,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchTickersReq {
@@ -126,11 +135,29 @@ pub struct ScreenSort {
 
 #[tool_router]
 impl IdxServer {
-    pub fn new(analytics: Arc<Analytics>) -> Self {
+    pub fn new(analytics: Arc<Analytics>, filings: Arc<Filings>) -> Self {
         Self {
             analytics,
+            filings,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(
+        description = "Fetch an IDX announcement/disclosure PDF by its url (the FullSavePath from get_announcements attachments) and return the extracted text. On-demand, cached; idx.co.id only."
+    )]
+    async fn get_filing(
+        &self,
+        Parameters(req): Parameters<FilingReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let filing = self.filings.fetch(&req.url).await.map_err(mcp_err)?;
+        Ok(json_value(&json!({
+            "url": filing.url,
+            "bytes": filing.bytes,
+            "chars": filing.chars,
+            "truncated": filing.truncated,
+            "text": filing.text,
+        })))
     }
 
     #[tool(description = "Search IDX tickers by symbol or company name.")]

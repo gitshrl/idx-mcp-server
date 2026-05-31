@@ -2,6 +2,7 @@ mod analytics;
 mod auth;
 mod catalog;
 mod config;
+mod filings;
 mod keys;
 mod oauth;
 mod server;
@@ -24,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 use crate::analytics::Analytics;
 use crate::auth::{AuthState, auth_middleware};
 use crate::config::Config;
+use crate::filings::Filings;
 use crate::keys::KeyStore;
 use crate::oauth::OAuthState;
 use crate::server::IdxServer;
@@ -68,9 +70,19 @@ async fn main() -> Result<()> {
 
     let ct = CancellationToken::new();
 
+    // On-demand filing fetcher (Chrome-emulating HTTP client; egress path kept
+    // separate from the locked, egress-free run_query engine).
+    let filings = Arc::new(Filings::new()?);
+
     let factory_analytics = analytics.clone();
+    let factory_filings = filings.clone();
     let mcp: StreamableHttpService<IdxServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(IdxServer::new(factory_analytics.clone())),
+        move || {
+            Ok(IdxServer::new(
+                factory_analytics.clone(),
+                factory_filings.clone(),
+            ))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
     );

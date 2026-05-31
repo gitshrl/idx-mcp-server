@@ -25,6 +25,7 @@
 - [get_broker_activity](16-tool-get-broker-activity.md): Per-broker buy/sell flow (bandarmology) for a ticker over a date range.
 - [get_ownership](17-tool-get-ownership.md): KSEI depository holders ≥1%, with local/foreign split.
 - [get_announcements](18-tool-get-announcements.md): IDX corporate announcements and news.
+- [get_filing](19-tool-get-filing.md): on-demand — fetch + text-extract an announcement PDF past the Cloudflare wall via Chrome-TLS emulation (headless-browser fallback), cached.
 
 ## Reviews & testing
 
