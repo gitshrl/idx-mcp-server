@@ -26,7 +26,7 @@ use crate::analytics::Analytics;
 use crate::auth::{AuthState, auth_middleware};
 use crate::config::Config;
 use crate::filings::Filings;
-use crate::keys::KeyStore;
+use crate::keys::{KeyStore, UsageLogger};
 use crate::oauth::OAuthState;
 use crate::server::IdxServer;
 
@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
     }
 
     let keys = Arc::new(KeyStore::open(&cfg.sqlite_path)?);
+    // Single bounded background writer for usage telemetry (batched + pruned).
+    let usage = UsageLogger::spawn(keys.clone());
 
     // Build the loaded, locked, read-only serving database. Fails fast if no
     // data could be loaded.
@@ -90,6 +92,7 @@ async fn main() -> Result<()> {
     let auth_state = AuthState {
         keys: keys.clone(),
         public_url: cfg.public_url.clone(),
+        usage,
     };
     let oauth_state = OAuthState {
         keys: keys.clone(),

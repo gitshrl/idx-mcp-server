@@ -1,9 +1,11 @@
 use std::fmt::Write as _;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -95,14 +97,40 @@ impl KeyStore {
         Ok(id)
     }
 
-    pub fn log_usage(&self, key_id: i64, tool: &str, latency_ms: i64, rows: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        conn.execute(
-            "INSERT INTO usage (key_id, tool, ts, latency_ms, rows) VALUES (?1, ?2, datetime('now'), ?3, ?4)",
-            params![key_id, tool, latency_ms, rows],
-        )
-        .context("log usage")?;
+    /// Insert a batch of usage events in one transaction (called by the single
+    /// background writer, never per-request — see `UsageLogger`).
+    pub fn log_usage_batch(&self, batch: &[UsageEvent]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let tx = conn.transaction().context("begin usage tx")?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO usage (key_id, tool, ts, latency_ms, rows) VALUES (?1, ?2, datetime('now'), ?3, 0)",
+                )
+                .context("prepare usage insert")?;
+            for e in batch {
+                stmt.execute(params![e.key_id, e.tool, e.latency_ms])
+                    .context("insert usage")?;
+            }
+        }
+        tx.commit().context("commit usage")?;
         Ok(())
+    }
+
+    /// Delete usage rows older than `keep_days` so the table can't grow without
+    /// bound on a long-lived server. Returns the number of rows removed.
+    pub fn prune_usage(&self, keep_days: u32) -> Result<usize> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = conn
+            .execute(
+                "DELETE FROM usage WHERE ts < datetime('now', ?1)",
+                params![format!("-{keep_days} days")],
+            )
+            .context("prune usage")?;
+        Ok(n)
     }
 
     // ---- OAuth authorization-server store (opaque, SHA-256-hashed) ----
@@ -220,6 +248,70 @@ impl KeyStore {
             .optional()
             .context("verify oauth token")?;
         Ok(hit.is_some())
+    }
+}
+
+/// A single tool-call usage record, queued to the background writer.
+pub struct UsageEvent {
+    pub key_id: i64,
+    pub tool: String,
+    pub latency_ms: i64,
+}
+
+/// Bounded, off-request usage logger. One background task drains a bounded
+/// channel, batch-writes to `SQLite`, and periodically prunes old rows — so the
+/// request path never spawns an unbounded task or contends on the DB, and the
+/// `usage` table can't grow without limit. Telemetry is best-effort: a full
+/// queue drops the event rather than backpressuring the request.
+#[derive(Clone)]
+pub struct UsageLogger {
+    tx: mpsc::Sender<UsageEvent>,
+}
+
+impl UsageLogger {
+    /// Spawn the background writer over `keys`; returns a cloneable handle.
+    #[must_use]
+    pub fn spawn(keys: Arc<KeyStore>) -> Self {
+        let (tx, mut rx) = mpsc::channel::<UsageEvent>(4096);
+        tokio::spawn(async move {
+            let mut buf: Vec<UsageEvent> = Vec::with_capacity(128);
+            // `Duration::from_hours` is unstable on the pinned 1.96 toolchain.
+            #[allow(clippy::duration_suboptimal_units)]
+            let mut prune = tokio::time::interval(Duration::from_secs(6 * 3600));
+            prune.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    n = rx.recv_many(&mut buf, 128) => {
+                        if n == 0 {
+                            break; // all senders dropped
+                        }
+                        let batch = std::mem::take(&mut buf);
+                        let k = keys.clone();
+                        match tokio::task::spawn_blocking(move || k.log_usage_batch(&batch)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::warn!(error = %e, "usage batch write failed"),
+                            Err(e) => tracing::warn!(error = %e, "usage writer panicked"),
+                        }
+                    }
+                    _ = prune.tick() => {
+                        let k = keys.clone();
+                        if let Ok(Ok(removed)) =
+                            tokio::task::spawn_blocking(move || k.prune_usage(90)).await
+                            && removed > 0
+                        {
+                            tracing::info!(removed, "pruned old usage rows");
+                        }
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Record a usage event without blocking the request path; drops it if the
+    /// queue is full (best-effort telemetry).
+    pub fn record(&self, event: UsageEvent) {
+        let _ = self.tx.try_send(event);
     }
 }
 

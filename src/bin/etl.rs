@@ -38,7 +38,12 @@ fn main() -> anyhow::Result<()> {
 
     let conn = Connection::open_in_memory()?;
     // Many daily partitions per dataset; let DuckDB keep enough files open.
-    conn.execute_batch("SET threads TO 4; SET partitioned_write_max_open_files TO 2000;")?;
+    // `preserve_insertion_order=false` lets partitioned COPY stream instead of
+    // buffering the whole result, so a big dataset (e.g. exploded broker_activity)
+    // doesn't blow up memory or thrash.
+    conn.execute_batch(
+        "SET threads TO 4; SET preserve_insertion_order=false; SET partitioned_write_max_open_files TO 2000;",
+    )?;
 
     let mut ok = 0usize;
     for s in &stmts {

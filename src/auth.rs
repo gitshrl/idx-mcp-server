@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::keys::KeyStore;
+use crate::keys::{KeyStore, UsageEvent, UsageLogger};
 
 /// MCP JSON-RPC request bodies are small; cap what we buffer for tool-name
 /// extraction so a large body can't exhaust memory.
@@ -20,6 +20,8 @@ pub struct AuthState {
     pub keys: Arc<KeyStore>,
     /// Canonical base URL, for the `WWW-Authenticate` discovery hint + audience.
     pub public_url: String,
+    /// Off-request, bounded usage writer (no per-request spawn).
+    pub usage: UsageLogger,
 }
 
 /// Who authenticated. API-key requests carry a key id for usage logging; OAuth
@@ -90,18 +92,13 @@ pub async fn auth_middleware(
     let response = next.run(request).await;
     let latency_ms = i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-    // Log usage off the request path so the SQLite write never delays the reply.
-    // Only API-key requests have a key id; OAuth requests skip logging for now.
+    // Hand usage to the bounded background writer — no per-request spawn, no DB
+    // contention on the hot path. Only API-key requests carry a key id.
     if let Principal::ApiKey(key_id) = principal {
-        let keys = state.keys.clone();
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || keys.log_usage(key_id, &tool, latency_ms, 0))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(error = %e, "usage logging failed"),
-                Err(e) => tracing::warn!(error = %e, "usage logging task panicked"),
-            }
+        state.usage.record(UsageEvent {
+            key_id,
+            tool,
+            latency_ms,
         });
     }
 
